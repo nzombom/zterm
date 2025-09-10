@@ -1,18 +1,16 @@
 const std = @import("std");
-// const xcb = @cImport(@cInclude("xcb/xcb.h"));
-const xcb = @cImport(@cInclude("X11/Xlib-xcb.h"));
+const xcb = @cImport(@cInclude("xcb/xcb.h"));
 
-var display: *xcb.Display = undefined;
 var connection: *xcb.xcb_connection_t = undefined;
 var screen: *xcb.xcb_screen_t = undefined;
 
-pub const WindowError = error{ OpenFailed };
-pub const RendererError = error{ OpenFailed };
+pub const DisplayError = error{ InitFailed };
+pub const WindowError = error{ OpenFailed, DoesNotExist };
 
-pub fn init() void {
+pub fn init() DisplayError!void {
 	var screen_n: i32 = undefined;
 	connection = xcb.xcb_connect(null, &screen_n)
-		orelse unreachable;
+		orelse return DisplayError.InitFailed;
 	const setup = xcb.xcb_get_setup(connection);
 	var screen_iter = xcb.xcb_setup_roots_iterator(setup);
 	var i: u32 = 0;
@@ -91,13 +89,13 @@ pub const Event = struct {
 	w_id: ?xcb.xcb_window_t,
 };
 
-inline fn castEvent(T: anytype, e: ?*xcb.xcb_generic_event_t) *T {
+inline fn castEvent(T: type, e: ?*xcb.xcb_generic_event_t) *T {
 	return @as(*T, @ptrCast(e.?));
 }
-pub fn getEvent() Event {
+pub fn getEvent() WindowError!Event {
 	var event: ?*xcb.xcb_generic_event_t = undefined;
 	event = xcb.xcb_wait_for_event(connection);
-	if (event == null) return Event{ .type = .none, .w_id = null };
+	if (event == null) return WindowError.DoesNotExist;
 	switch (event.?.response_type) {
 		xcb.XCB_DESTROY_NOTIFY => return Event{
 			.type = .destroy,
@@ -107,7 +105,7 @@ pub fn getEvent() Event {
 			.type = .expose,
 			.w_id = castEvent(xcb.xcb_expose_event_t, event).window,
 		},
-		xcb.XCB_CONFIGURE_NOTIFY => return Event{
+		xcb.XCB_CONFIGURE_NOTIFY => return .{
 			.type = .{ .resize = .{
 				.w = castEvent(xcb.xcb_configure_notify_event_t, event).width,
 				.h = castEvent(xcb.xcb_configure_notify_event_t, event).height,
