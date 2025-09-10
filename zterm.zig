@@ -11,8 +11,8 @@ pub fn main() !void {
 
 	while (true) {
 		const e = x.getEvent();
-		if (e.type == x.Event.Type.destroy) break;
 		std.debug.print("{}\n", .{ e });
+		if (e.type == x.Event.Type.destroy) break;
 		x.flush();
 	}
 

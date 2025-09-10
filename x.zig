@@ -7,6 +7,7 @@ var connection: *xcb.xcb_connection_t = undefined;
 var screen: *xcb.xcb_screen_t = undefined;
 
 pub const WindowError = error{ OpenFailed };
+pub const RendererError = error{ OpenFailed };
 
 pub fn init() void {
 	var screen_n: i32 = undefined;
@@ -30,49 +31,34 @@ pub fn flush() void {
 
 pub const Window = struct {
 	id: xcb.xcb_window_t,
-	gc: xcb.xcb_gcontext_t,
 
 	pub fn open() WindowError!Window {
 		return openRes(800, 600);
 	}
 	pub fn openRes(width: u16, height: u16) WindowError!Window {
-		const w = Window{
-			.id = xcb.xcb_generate_id(connection),
-			.gc = xcb.xcb_generate_id(connection),
-		};
+		const w = Window{ .id = xcb.xcb_generate_id(connection) };
 
 		var value_buffer: [8]u8 = undefined;
 		var values: ?*[8]u8 = &value_buffer;
+		const value_mask = xcb.XCB_CW_BACK_PIXEL
+			| xcb.XCB_CW_EVENT_MASK;
+		_ = xcb.xcb_create_window_value_list_serialize(&values, value_mask, &.{
+			.background_pixel = 0xc0201e24,
+			.event_mask = xcb.XCB_EVENT_MASK_EXPOSURE
+				| xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY
+				| xcb.XCB_EVENT_MASK_KEY_PRESS
+				| xcb.XCB_EVENT_MASK_KEY_RELEASE,
+		});
 
-		const open_value_mask = xcb.XCB_CW_BACK_PIXEL | xcb.XCB_CW_EVENT_MASK;
-		_ = xcb.xcb_create_window_value_list_serialize(
-			&values, open_value_mask, &.{
-				.background_pixel = 0xc0201e24,
-				.event_mask = xcb.XCB_EVENT_MASK_EXPOSURE
-					| xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY
-					| xcb.XCB_EVENT_MASK_KEY_PRESS
-					| xcb.XCB_EVENT_MASK_KEY_RELEASE,
-			});
-		const open_request = xcb.xcb_create_window_checked(connection, 24,
+		const request = xcb.xcb_create_window_checked(connection, 24,
 			w.id, screen.*.root, 0, 0, width, height,
 			0, xcb.XCB_WINDOW_CLASS_INPUT_OUTPUT, screen.*.root_visual,
-			open_value_mask, values);
+			value_mask, values);
 
-		const gc_value_mask = xcb.XCB_GC_FOREGROUND;
-		_ = xcb.xcb_create_gc_value_list_serialize(
-			&values, gc_value_mask, &.{
-				.foreground = 0xffffffff,
-			});
-		const gc_request = xcb.xcb_create_gc(connection,
-			w.gc, w.id, gc_value_mask, values);
-
-		const open_err = xcb.xcb_request_check(connection, open_request);
-		const gc_err = xcb.xcb_request_check(connection, gc_request);
-		var err = false;
-		if (open_err != null) { err = true; std.c.free(open_err); }
-		if (gc_err != null) { err = true; std.c.free(gc_err); }
-
-		return if (err) WindowError.OpenFailed else w;
+		const err = xcb.xcb_request_check(connection, request);
+		errdefer std.c.free(err);
+		return if (err != null) WindowError.OpenFailed
+			else w;
 	}
 	pub fn close(w: Window) void {
 		_ = xcb.xcb_destroy_window(connection, w.id);
