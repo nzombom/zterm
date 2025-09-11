@@ -6,7 +6,8 @@ const font = @import("font.zig");
 pub fn main() !void {
 	try font.init();
 	defer font.deinit();
-	try font.load("monospace");
+	const f = try font.Face.load("monospace:size=12");
+	_ = f;
 
 	try x.init();
 	const w = try x.Window.open();

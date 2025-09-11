@@ -1,4 +1,5 @@
 const std = @import("std");
+const config = @import("config.zig");
 const xcb = @cImport(@cInclude("xcb/xcb.h"));
 
 var connection: *xcb.xcb_connection_t = undefined;
@@ -37,7 +38,7 @@ pub const Window = struct {
 		const value_mask = xcb.XCB_CW_BACK_PIXEL
 			| xcb.XCB_CW_EVENT_MASK;
 		_ = xcb.xcb_create_window_value_list_serialize(&values, value_mask, &.{
-			.background_pixel = 0xc0201e24,
+			.background_pixel = config.background_color,
 			.event_mask = xcb.XCB_EVENT_MASK_EXPOSURE
 				| xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY
 				| xcb.XCB_EVENT_MASK_KEY_PRESS

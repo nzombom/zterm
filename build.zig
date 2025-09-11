@@ -16,10 +16,11 @@ pub fn build(b: *std.Build) void {
 	exe.linkLibC();
 	exe.linkSystemLibrary("xcb");
 	exe.linkSystemLibrary("fontconfig");
+	exe.linkSystemLibrary("freetype");
 
 	b.installArtifact(exe);
 
 	const run = b.addRunArtifact(exe);
-	const run_step = b.step("run", "run");
+	const run_step = b.step("run", "Run the program");
 	run_step.dependOn(&run.step);
 }
