@@ -1,4 +1,7 @@
 # zterm
 
 ## building
-`$ make`
+`$ zig build`
+
+## usage
+`$ zig build run` for now

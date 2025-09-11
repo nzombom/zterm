@@ -1,2 +1,2 @@
-zterm
-freetype/freetype.zig
+.zig-cache
+zig-out
