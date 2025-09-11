@@ -3,12 +3,8 @@ const fc = @cImport(@cInclude("fontconfig/fontconfig.h"));
 
 pub const FontError = error{ InitFailed, LoadFailed };
 
-pub fn init() FontError!void {
-	if(fc.FcInit() == 0) return FontError.InitFailed;
-}
-pub fn deinit() void {
-	fc.FcFini();
-}
+pub fn init() FontError!void { if(fc.FcInit() == 0) return error.InitFailed; }
+pub fn deinit() void { fc.FcFini(); }
 
 pub fn load(query: [:0]const u8) FontError!void {
 	const logger = std.log.scoped(.font);
@@ -18,19 +14,19 @@ pub fn load(query: [:0]const u8) FontError!void {
 	fc.FcDefaultSubstitute(search_pattern);
 	if (fc.FcConfigSubstitute(null,
 			search_pattern, fc.FcMatchPattern) == 0)
-		return FontError.LoadFailed;
+		return error.LoadFailed;
 
 	var result: fc.FcResult = undefined;
 	const pattern = fc.FcFontMatch(null, search_pattern, &result);
 	defer fc.FcPatternDestroy(pattern);
 	if (result != fc.FcResultMatch)
-		return FontError.LoadFailed;
+		return error.LoadFailed;
 
 	var file_value: fc.FcValue = undefined;
 	var index_value: fc.FcValue = undefined;
 	if (fc.FcPatternGet(pattern, fc.FC_FILE, 0, &file_value)
 		!= fc.FcResultMatch)
-		return FontError.LoadFailed;
+		return error.LoadFailed;
 	if (fc.FcPatternGet(pattern, fc.FC_INDEX, 0, &index_value)
 		!= fc.FcResultMatch) {
 		logger.info("has no index, defaulting to 0", .{});

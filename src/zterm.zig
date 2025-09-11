@@ -21,7 +21,6 @@ pub fn main() !void {
 		x.flush();
 	}
 
-
 	// var pty = try Pty.open("sh", &.{ "sh" });
 	// defer pty.close();
 	// while (true) {

@@ -19,13 +19,9 @@ pub fn init() DisplayError!void {
 	}
 	screen = screen_iter.data;
 }
-pub fn deinit() void {
-	xcb.xcb_disconnect(connection);
-}
+pub fn deinit() void { xcb.xcb_disconnect(connection); }
 
-pub fn flush() void {
-	_ = xcb.xcb_flush(connection);
-}
+pub fn flush() void { _ = xcb.xcb_flush(connection); }
 
 pub const Window = struct {
 	id: xcb.xcb_window_t,
@@ -55,7 +51,7 @@ pub const Window = struct {
 
 		const err = xcb.xcb_request_check(connection, request);
 		errdefer std.c.free(err);
-		return if (err != null) WindowError.OpenFailed
+		return if (err != null) error.OpenFailed
 			else w;
 	}
 	pub fn close(w: Window) void {
@@ -95,7 +91,7 @@ inline fn castEvent(T: type, e: ?*xcb.xcb_generic_event_t) *T {
 pub fn getEvent() WindowError!Event {
 	var event: ?*xcb.xcb_generic_event_t = undefined;
 	event = xcb.xcb_wait_for_event(connection);
-	if (event == null) return WindowError.DoesNotExist;
+	if (event == null) return error.DoesNotExist;
 	switch (event.?.response_type) {
 		xcb.XCB_DESTROY_NOTIFY => return Event{
 			.type = .destroy,
