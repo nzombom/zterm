@@ -1,4 +1,4 @@
 # zterm
 
 ## building
-`$ zig build`
+`$ make`
