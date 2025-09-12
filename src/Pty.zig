@@ -3,9 +3,9 @@ const Pty = @This();
 const std = @import("std");
 const pty_h = @cImport(@cInclude("pty.h"));
 
-pub const InitError = error{ OpenFailed, ForkFailed };
-pub const ReadError = error{ EndOfStream, ReadFailed };
-pub const WriteError = error{ EndOfStream, WriteFailed };
+pub const InitError = error { OpenFailed, ForkFailed };
+pub const ReadError = error { EndOfStream, ReadFailed };
+pub const WriteError = error { EndOfStream, WriteFailed };
 
 m: std.fs.File,
 

@@ -3,11 +3,18 @@ const Pty = @import("Pty.zig");
 const x = @import("x.zig");
 const font = @import("font.zig");
 
+const log = @import("log.zig");
+pub const std_options = std.Options{
+	.log_level = .debug,
+	.logFn = log.logFn,
+};
+
 pub fn main() !void {
 	try font.init();
 	defer font.deinit();
 	const f = try font.Face.load("monospace:size=12");
-	_ = f;
+	std.debug.print("glyph index for 0x{0x} 'a': {0}\n",
+		.{ f.getCharGlyphIndex('a') });
 
 	try x.init();
 	const w = try x.Window.open();
@@ -17,7 +24,7 @@ pub fn main() !void {
 
 	while (true) {
 		const e = try x.getEvent();
-		std.debug.print("{}\n", .{ e });
+		// std.debug.print("{}\n", .{ e });
 		if (e.type == x.Event.Type.destroy) break;
 		x.flush();
 	}

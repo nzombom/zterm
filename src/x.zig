@@ -5,8 +5,8 @@ const xcb = @cImport(@cInclude("xcb/xcb.h"));
 var connection: *xcb.xcb_connection_t = undefined;
 var screen: *xcb.xcb_screen_t = undefined;
 
-pub const DisplayError = error{ InitFailed };
-pub const WindowError = error{ OpenFailed, DoesNotExist };
+pub const DisplayError = error { InitFailed };
+pub const WindowError = error { OpenFailed, DoesNotExist };
 
 pub fn init() DisplayError!void {
 	var screen_n: i32 = undefined;
@@ -55,21 +55,12 @@ pub const Window = struct {
 		return if (err != null) error.OpenFailed
 			else w;
 	}
-	pub fn close(w: Window) void {
-		_ = xcb.xcb_destroy_window(connection, w.id);
+	pub fn close(self: Window) void {
+		_ = xcb.xcb_destroy_window(connection, self.id);
 	}
 
-	pub fn map(w: Window) void {
-		_ = xcb.xcb_map_window(connection, w.id);
-	}
-
-	pub fn testLine(w: Window) void {
-		const points: [*]const xcb.xcb_point_t = &.{
-			xcb.xcb_point_t{ .x = 0, .y = 0 },
-			xcb.xcb_point_t{ .x = 800, .y = 600 },
-		};
-		_ = xcb.xcb_poly_line(connection, xcb.XCB_COORD_MODE_ORIGIN,
-			w.id, w.gc, 2, points);
+	pub fn map(self: Window) void {
+		_ = xcb.xcb_map_window(connection, self.id);
 	}
 };
 
