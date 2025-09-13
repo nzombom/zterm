@@ -1,3 +1,4 @@
+//! run a pseudoterm and provide basic i/o
 const Pty = @This();
 
 const std = @import("std");

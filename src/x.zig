@@ -1,12 +1,35 @@
+//! provides display functions using x11
+
 const std = @import("std");
 const config = @import("config.zig");
-const xcb = @cImport(@cInclude("xcb/xcb.h"));
+const font = @import("font.zig");
+const xcb = @cImport({
+	@cInclude("xcb/xcb.h");
+	@cInclude("xcb/render.h");
+	@cInclude("xcb/xcb_renderutil.h");
+});
+
+const logger = std.log.scoped(.display);
 
 var connection: *xcb.xcb_connection_t = undefined;
 var screen: *xcb.xcb_screen_t = undefined;
+var render_formats: [3]?*xcb.xcb_render_pictforminfo_t = undefined;
 
-pub const DisplayError = error { InitFailed };
-pub const WindowError = error { OpenFailed, DoesNotExist };
+pub const WindowID = xcb.xcb_window_t;
+
+pub const DisplayError = error { InitFailed, DoesNotExist };
+pub const WindowError = error { OpenFailed };
+
+fn check_xcb(req: xcb.xcb_void_cookie_t, err: anytype) @TypeOf(err)!void {
+	const e = xcb.xcb_request_check(connection, req);
+	if (e != null) {
+		logger.err("xcb error {} {}:{}", .{
+			e.*.error_code, e.*.major_code, e.*.minor_code,
+		});
+		std.c.free(e);
+		return err;
+	}
+}
 
 pub fn init() DisplayError!void {
 	var screen_n: i32 = undefined;
@@ -19,19 +42,36 @@ pub fn init() DisplayError!void {
 		xcb.xcb_screen_next(&screen_iter);
 	}
 	screen = screen_iter.data;
+
+	const formats_query = xcb.xcb_render_util_query_formats(connection);
+	render_formats = .{
+		xcb.xcb_render_util_find_standard_format(
+			formats_query, xcb.XCB_PICT_STANDARD_A_1),
+		xcb.xcb_render_util_find_standard_format(
+			formats_query, xcb.XCB_PICT_STANDARD_A_8),
+		xcb.xcb_render_util_find_standard_format(
+			formats_query, xcb.XCB_PICT_STANDARD_RGB_24),
+	};
 }
-pub fn deinit() void { xcb.xcb_disconnect(connection); }
+pub fn deinit() void {
+	xcb.xcb_disconnect(connection);
+}
 
 pub fn flush() void { _ = xcb.xcb_flush(connection); }
 
 pub const Window = struct {
-	id: xcb.xcb_window_t,
+	id: WindowID,
+	picture_id: xcb.xcb_render_picture_t,
+	pen_pixmap: xcb.xcb_render_picture_t,
+	pen: xcb.xcb_render_picture_t,
 
-	pub fn open() WindowError!Window {
-		return openRes(800, 600);
-	}
-	pub fn openRes(width: u16, height: u16) WindowError!Window {
-		const w = Window{ .id = xcb.xcb_generate_id(connection) };
+	pub fn open(width: u16, height: u16) WindowError!Window {
+		const w = Window{
+			.id = xcb.xcb_generate_id(connection),
+			.picture_id = xcb.xcb_generate_id(connection),
+			.pen = xcb.xcb_generate_id(connection),
+			.pen_pixmap = xcb.xcb_generate_id(connection),
+		};
 
 		var value_buffer: [8]u8 = undefined;
 		var values: ?*[8]u8 = &value_buffer;
@@ -45,46 +85,100 @@ pub const Window = struct {
 				| xcb.XCB_EVENT_MASK_KEY_RELEASE,
 		});
 
-		const request = xcb.xcb_create_window_checked(connection, 24,
+		try check_xcb(xcb.xcb_create_window_checked(connection, 24,
 			w.id, screen.*.root, 0, 0, width, height,
 			0, xcb.XCB_WINDOW_CLASS_INPUT_OUTPUT, screen.*.root_visual,
-			value_mask, values);
+			value_mask, values), error.OpenFailed);
 
-		const err = xcb.xcb_request_check(connection, request);
-		errdefer std.c.free(err);
-		return if (err != null) error.OpenFailed
-			else w;
+		const pictformat = render_formats[2];
+		try check_xcb(xcb.xcb_render_create_picture(connection,
+			w.picture_id, w.id, pictformat.?.id, 0, null), error.OpenFailed);
+
+		_ = xcb.xcb_create_pixmap(connection, 24, w.pen_pixmap, w.id, 1, 1);
+		_ = xcb.xcb_render_create_picture(connection,
+			w.pen, w.pen_pixmap, render_formats[2].?.id,
+			xcb.XCB_RENDER_CP_REPEAT, &xcb.XCB_RENDER_REPEAT_NORMAL);
+
+		return w;
 	}
 	pub fn close(self: Window) void {
+		_ = xcb.xcb_render_free_picture(connection, self.pen);
+		_ = xcb.xcb_free_pixmap(connection, self.pen_pixmap);
 		_ = xcb.xcb_destroy_window(connection, self.id);
 	}
 
 	pub fn map(self: Window) void {
 		_ = xcb.xcb_map_window(connection, self.id);
 	}
+
+	pub fn renderBitmap(
+		self: Window, bitmap: font.Bitmap,
+		x: i16, y: i16,
+	) void {
+		const pixmap = xcb.xcb_generate_id(connection);
+		_ = xcb.xcb_create_pixmap(connection,
+			bitmap.mode.bitSize(), pixmap, self.id, bitmap.w, bitmap.h);
+		defer _ = xcb.xcb_free_pixmap(connection, pixmap);
+
+		const gc = xcb.xcb_generate_id(connection);
+		_ = xcb.xcb_create_gc(
+			connection, gc, pixmap,
+			0, null);
+		defer _ = xcb.xcb_free_gc(connection, gc);
+
+		_ = xcb.xcb_put_image(connection, xcb.XCB_IMAGE_FORMAT_Z_PIXMAP,
+			pixmap, gc, bitmap.w, bitmap.h, 0, 0, 0, bitmap.mode.bitSize(),
+			@as(u32, bitmap.pitch) * @as(u32, bitmap.h), bitmap.data.ptr);
+
+		const pictformat = render_formats[@intFromEnum(bitmap.mode)];
+		const picture = xcb.xcb_generate_id(connection);
+		_ = xcb.xcb_render_create_picture(connection,
+			picture, pixmap, pictformat.?.id, 0, null);
+		defer _ = xcb.xcb_render_free_picture(connection, picture);
+
+		_ = xcb.xcb_render_fill_rectangles(connection,
+			xcb.XCB_RENDER_PICT_OP_SRC, self.pen, .{
+				.alpha = (config.foreground_color >> 24) * 256,
+				.red = (config.foreground_color >> 16) % 256 * 256,
+				.green = (config.foreground_color >> 8) % 256 * 256,
+				.blue = config.foreground_color % 256 * 256,
+			}, 1, &.{ .x = 0, .y = 0, .width = 1, .height = 1 });
+
+		_ = xcb.xcb_render_composite(connection,
+			xcb.XCB_RENDER_PICT_OP_OVER, self.pen, picture, self.picture_id,
+			0, 0, 0, 0, x + bitmap.x, y - bitmap.y, bitmap.w, bitmap.h);
+	}
 };
 
 pub const Event = struct {
 	pub const Type = union(enum) {
-		none,
 		unknown,
+		err,
 		destroy,
 		expose,
 		resize: struct { w: u16, h: u16 },
 		key: struct { down: bool, code: u16 },
 	};
 	type: Type,
-	w_id: ?xcb.xcb_window_t,
+	w_id: ?WindowID,
 };
 
 inline fn castEvent(T: type, e: ?*xcb.xcb_generic_event_t) *T {
 	return @as(*T, @ptrCast(e.?));
 }
-pub fn getEvent() WindowError!Event {
+
+pub fn getEvent() DisplayError!Event {
 	var event: ?*xcb.xcb_generic_event_t = undefined;
 	event = xcb.xcb_wait_for_event(connection);
 	if (event == null) return error.DoesNotExist;
 	switch (event.?.response_type) {
+		0 => {
+			const err = castEvent(xcb.xcb_generic_error_t, event);
+			logger.err("xcb error {} {}:{}", .{
+				err.*.error_code, err.*.major_code, err.*.minor_code,
+			});
+			return Event { .type = .err, .w_id = null };
+		},
 		xcb.XCB_DESTROY_NOTIFY => return Event{
 			.type = .destroy,
 			.w_id = castEvent(xcb.xcb_destroy_notify_event_t, event).window,
