@@ -13,14 +13,13 @@ const logger = std.log.scoped(.display);
 
 var connection: *xcb.xcb_connection_t = undefined;
 var screen: *xcb.xcb_screen_t = undefined;
-var render_formats: [3]?*xcb.xcb_render_pictforminfo_t = undefined;
-
-pub const WindowID = xcb.xcb_window_t;
+var render_formats: [3]*xcb.xcb_render_pictforminfo_t = undefined;
 
 pub const DisplayError = error { InitFailed, DoesNotExist };
 pub const WindowError = error { OpenFailed };
+pub const FontError = error { OutOfMemory, OpenFailed, RenderFailed };
 
-fn check_xcb(req: xcb.xcb_void_cookie_t, err: anytype) @TypeOf(err)!void {
+fn checkXcb(req: xcb.xcb_void_cookie_t, err: anytype) @TypeOf(err)!void {
 	const e = xcb.xcb_request_check(connection, req);
 	if (e != null) {
 		logger.err("xcb error {} {}:{}", .{
@@ -53,26 +52,109 @@ pub fn init() DisplayError!void {
 			formats_query, xcb.XCB_PICT_STANDARD_RGB_24),
 	};
 }
-pub fn deinit() void {
-	xcb.xcb_disconnect(connection);
-}
-
+pub fn deinit() void { xcb.xcb_disconnect(connection); }
 pub fn flush() void { _ = xcb.xcb_flush(connection); }
 
+const PreparedBitmap = struct {
+	// if bitmap is zero-size
+	// then pixmap and picture are not guaranteed to exist
+	pixmap: xcb.xcb_pixmap_t,
+	picture: xcb.xcb_render_picture_t,
+	bitmap: font.Bitmap,
+
+	pub fn init(
+		allocator: std.mem.Allocator, bitmap: font.Bitmap,
+	) PreparedBitmap {
+		if (bitmap.w == 0 or bitmap.h == 0) return .{
+			.pixmap = 0, .picture = 0, .bitmap = bitmap,
+		};
+
+		const prepared = PreparedBitmap{
+			.pixmap = xcb.xcb_generate_id(connection),
+			.picture = xcb.xcb_generate_id(connection),
+			.bitmap = bitmap,
+		};
+
+		_ = xcb.xcb_create_pixmap(connection, bitmap.mode.bitSize(),
+			prepared.pixmap, screen.root, bitmap.w, bitmap.h);
+		const gc = xcb.xcb_generate_id(connection);
+		_ = xcb.xcb_create_gc(connection, gc, prepared.pixmap, 0, null);
+		_ = xcb.xcb_put_image(connection, xcb.XCB_IMAGE_FORMAT_Z_PIXMAP,
+			prepared.pixmap, gc, bitmap.w, bitmap.h, 0, 0,
+			0, bitmap.mode.bitSize(), bitmap.pitch * bitmap.h,
+			bitmap.data.ptr);
+		_ = xcb.xcb_render_create_picture(connection, prepared.picture,
+			prepared.pixmap, render_formats[@intFromEnum(bitmap.mode)].id,
+			0, null);
+		flush();
+		bitmap.deinit(allocator);
+
+		return prepared;
+	}
+
+	pub fn deinit(self: PreparedBitmap) void {
+		_ = xcb.xcb_render_free_picture(connection, self.picture);
+		_ = xcb.xcb_free_pixmap(connection, self.pixmap);
+	}
+};
+const GlyphSet = std.AutoArrayHashMap(u32, PreparedBitmap);
+
+pub const DisplayFont = struct {
+	allocator: std.mem.Allocator,
+	gs: *GlyphSet,
+	face: font.Face,
+	mode: font.PixelMode,
+
+	pub fn init(
+		allocator: std.mem.Allocator,
+		name: [:0]const u8, mode: font.PixelMode,
+	) FontError!DisplayFont {
+		const gs = try allocator.create(GlyphSet);
+		gs.* = GlyphSet.init(allocator);
+		return .{
+			.allocator = allocator,
+			.gs = gs,
+			.face = font.Face.init(name) catch return error.OpenFailed,
+			.mode = mode,
+		};
+	}
+	pub fn deinit(self: *DisplayFont) void {
+		for (self.gs.iterator().values) |g| g.deinit();
+		self.gs.deinit();
+		self.allocator.destroy(self.gs);
+		self.face.deinit();
+	}
+
+	pub fn getGlyphFromChar(
+		self: DisplayFont, c: u32
+	) FontError!PreparedBitmap {
+		return self.gs.get(c) orelse {
+			const g = PreparedBitmap.init(self.allocator,
+				self.face.renderGlyph(self.allocator,
+					self.face.getCharGlyphIndex(c), self.mode)
+				catch return error.RenderFailed);
+			try self.gs.put(c, g);
+			return g;
+		};
+	}
+};
+
+pub const WindowID = xcb.xcb_window_t;
 pub const Window = struct {
 	id: WindowID,
-	picture_id: xcb.xcb_render_picture_t,
-	pen_pixmap: xcb.xcb_render_picture_t,
+	picture: xcb.xcb_render_picture_t,
+	pen_pixmap: xcb.xcb_pixmap_t,
 	pen: xcb.xcb_render_picture_t,
 
 	pub fn open(width: u16, height: u16) WindowError!Window {
 		const w = Window{
 			.id = xcb.xcb_generate_id(connection),
-			.picture_id = xcb.xcb_generate_id(connection),
+			.picture = xcb.xcb_generate_id(connection),
 			.pen = xcb.xcb_generate_id(connection),
 			.pen_pixmap = xcb.xcb_generate_id(connection),
 		};
 
+		// create the window
 		var value_buffer: [8]u8 = undefined;
 		var values: ?*[8]u8 = &value_buffer;
 		const value_mask = xcb.XCB_CW_BACK_PIXEL
@@ -84,20 +166,27 @@ pub const Window = struct {
 				| xcb.XCB_EVENT_MASK_KEY_PRESS
 				| xcb.XCB_EVENT_MASK_KEY_RELEASE,
 		});
-
-		try check_xcb(xcb.xcb_create_window_checked(connection, 24,
+		try checkXcb(xcb.xcb_create_window_checked(connection, 24,
 			w.id, screen.*.root, 0, 0, width, height,
 			0, xcb.XCB_WINDOW_CLASS_INPUT_OUTPUT, screen.*.root_visual,
 			value_mask, values), error.OpenFailed);
 
-		const pictformat = render_formats[2];
-		try check_xcb(xcb.xcb_render_create_picture(connection,
-			w.picture_id, w.id, pictformat.?.id, 0, null), error.OpenFailed);
+		// create the xrender picture
+		try checkXcb(xcb.xcb_render_create_picture(connection,
+			w.picture, w.id, render_formats[2].id, 0, null), error.OpenFailed);
 
+		// create the pen & set the color
 		_ = xcb.xcb_create_pixmap(connection, 24, w.pen_pixmap, w.id, 1, 1);
 		_ = xcb.xcb_render_create_picture(connection,
-			w.pen, w.pen_pixmap, render_formats[2].?.id,
+			w.pen, w.pen_pixmap, render_formats[2].id,
 			xcb.XCB_RENDER_CP_REPEAT, &xcb.XCB_RENDER_REPEAT_NORMAL);
+		_ = xcb.xcb_render_fill_rectangles(connection,
+			xcb.XCB_RENDER_PICT_OP_SRC, w.pen, .{
+				.alpha = (config.foreground_color >> 24) * 256,
+				.red = (config.foreground_color >> 16) % 256 * 256,
+				.green = (config.foreground_color >> 8) % 256 * 256,
+				.blue = config.foreground_color % 256 * 256,
+			}, 1, &.{ .x = 0, .y = 0, .width = 1, .height = 1 });
 
 		return w;
 	}
@@ -111,43 +200,19 @@ pub const Window = struct {
 		_ = xcb.xcb_map_window(connection, self.id);
 	}
 
-	pub fn renderBitmap(
-		self: Window, bitmap: font.Bitmap,
-		x: i16, y: i16,
-	) void {
-		const pixmap = xcb.xcb_generate_id(connection);
-		_ = xcb.xcb_create_pixmap(connection,
-			bitmap.mode.bitSize(), pixmap, self.id, bitmap.w, bitmap.h);
-		defer _ = xcb.xcb_free_pixmap(connection, pixmap);
-
-		const gc = xcb.xcb_generate_id(connection);
-		_ = xcb.xcb_create_gc(
-			connection, gc, pixmap,
-			0, null);
-		defer _ = xcb.xcb_free_gc(connection, gc);
-
-		_ = xcb.xcb_put_image(connection, xcb.XCB_IMAGE_FORMAT_Z_PIXMAP,
-			pixmap, gc, bitmap.w, bitmap.h, 0, 0, 0, bitmap.mode.bitSize(),
-			@as(u32, bitmap.pitch) * @as(u32, bitmap.h), bitmap.data.ptr);
-
-		const pictformat = render_formats[@intFromEnum(bitmap.mode)];
-		const picture = xcb.xcb_generate_id(connection);
-		_ = xcb.xcb_render_create_picture(connection,
-			picture, pixmap, pictformat.?.id, 0, null);
-		defer _ = xcb.xcb_render_free_picture(connection, picture);
-
-		_ = xcb.xcb_render_fill_rectangles(connection,
-			xcb.XCB_RENDER_PICT_OP_SRC, self.pen, .{
-				.alpha = (config.foreground_color >> 24) * 256,
-				.red = (config.foreground_color >> 16) % 256 * 256,
-				.green = (config.foreground_color >> 8) % 256 * 256,
-				.blue = config.foreground_color % 256 * 256,
-			}, 1, &.{ .x = 0, .y = 0, .width = 1, .height = 1 });
-
-		_ = xcb.xcb_render_composite(connection,
-			xcb.XCB_RENDER_PICT_OP_OVER, self.pen, picture, self.picture_id,
-			0, 0, 0, 0, x + bitmap.x, y - bitmap.y, bitmap.w, bitmap.h);
+	fn renderBitmap(
+		self: Window, bitmap: PreparedBitmap, x: i16, y: i16,
+	) FontError!void {
+		if (bitmap.bitmap.w == 0 or bitmap.bitmap.h == 0) return;
+		_ = xcb.xcb_render_composite(connection, xcb.XCB_RENDER_PICT_OP_OVER,
+			self.pen, bitmap.picture, self.picture,
+			0, 0, 0, 0, x + bitmap.bitmap.x, y + bitmap.bitmap.y,
+			bitmap.bitmap.w, bitmap.bitmap.h);
 	}
+
+	pub fn renderChar(
+		self: Window, df: DisplayFont, c: u32, x: i16, y: i16
+	) FontError!void { try self.renderBitmap(try df.getGlyphFromChar(c), x, y); }
 };
 
 pub const Event = struct {
@@ -163,15 +228,15 @@ pub const Event = struct {
 	w_id: ?WindowID,
 };
 
-inline fn castEvent(T: type, e: ?*xcb.xcb_generic_event_t) *T {
-	return @as(*T, @ptrCast(e.?));
+inline fn castEvent(T: type, e: *xcb.xcb_generic_event_t) *T {
+	return @as(*T, @ptrCast(e));
 }
 
 pub fn getEvent() DisplayError!Event {
-	var event: ?*xcb.xcb_generic_event_t = undefined;
-	event = xcb.xcb_wait_for_event(connection);
-	if (event == null) return error.DoesNotExist;
-	switch (event.?.response_type) {
+	var event: *xcb.xcb_generic_event_t = undefined;
+	event = xcb.xcb_wait_for_event(connection)
+		orelse return error.DoesNotExist;
+	switch (event.response_type) {
 		0 => {
 			const err = castEvent(xcb.xcb_generic_error_t, event);
 			logger.err("xcb error {} {}:{}", .{

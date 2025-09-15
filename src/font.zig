@@ -41,7 +41,7 @@ pub const PixelMode = enum {
 };
 
 pub const Bitmap = struct {
-	x: i16, y: i16,
+	x: i16, y: i16, // positive y = down
 	w: u16, h: u16,
 	pitch: u16,
 	mode: PixelMode,
@@ -61,7 +61,7 @@ pub const Bitmap = struct {
 		return self.pitch * 8 - self.w * self.mode.bitSize();
 	}
 
-	pub fn free(self: Bitmap, allocator: std.mem.Allocator) void {
+	pub fn deinit(self: Bitmap, allocator: std.mem.Allocator) void {
 		allocator.free(self.data);
 	}
 };
@@ -70,7 +70,7 @@ pub const Face = struct {
 	f: ft.FT_Face,
 
 	/// load a face given a fontconfig string
-	pub fn load(query: [:0]const u8) LoadError!Face {
+	pub fn init(query: [:0]const u8) LoadError!Face {
 		logger.debug("loading font \"{s}\"", .{ query });
 		const search_pattern = fc.FcNameParse(query.ptr);
 		defer fc.FcPatternDestroy(search_pattern);
@@ -125,6 +125,7 @@ pub const Face = struct {
 
 		return .{ .f = face };
 	}
+	pub fn deinit(self: Face) void { _ = ft.FT_Done_Face(self.f); }
 
 	pub fn getCharGlyphIndex(self: Face, c: u32) u32 {
 		const idx = ft.FT_Get_Char_Index(self.f, c);
@@ -133,12 +134,10 @@ pub const Face = struct {
 	}
 
 	/// render a glyph and return a bitmap;
-	/// caller must free the bitmap with .free()
+	/// caller must free the bitmap with .deinit()
 	pub fn renderGlyph(
-		self: Face,
-		allocator: std.mem.Allocator,
-		idx: u32,
-		mode: PixelMode,
+		self: Face, allocator: std.mem.Allocator,
+		idx: u32, mode: PixelMode,
 	) RenderError!Bitmap {
 		if (ft.FT_Load_Glyph(self.f, idx, ft.FT_LOAD_DEFAULT) != 0)
 			return error.DrawFailed;
@@ -163,7 +162,7 @@ pub const Face = struct {
 				bmp.buffer[bmp_pitch * y .. bmp_pitch * y + pitch]);
 		}
 		return .{
-			.x = @intCast(g.*.bitmap_left), .y = @intCast(g.*.bitmap_top),
+			.x = @intCast(g.*.bitmap_left), .y = @intCast(-g.*.bitmap_top),
 			.w = @as(u16, @intCast(bmp.width))
 				/ @as(u16, if (mode == .lcd) 3 else 1),
 			.h = @intCast(bmp.rows),
