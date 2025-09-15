@@ -68,9 +68,10 @@ pub const Bitmap = struct {
 
 pub const Face = struct {
 	f: ft.FT_Face,
+	width: u16, height: u16,
 
 	/// load a face given a fontconfig string
-	pub fn init(query: [:0]const u8) LoadError!Face {
+	pub fn init(query: [:0]const u8, dpi: u16) LoadError!Face {
 		logger.debug("loading font \"{s}\"", .{ query });
 		const search_pattern = fc.FcNameParse(query.ptr);
 		defer fc.FcPatternDestroy(search_pattern);
@@ -91,7 +92,7 @@ pub const Face = struct {
 
 		var file: [:0]const u8 = undefined;
 		var index: i32 = 0;
-		var size: f64 = 12.0;
+		var size: f64 = 16.0;
 
 		if (fc.FcPatternGet(pattern, fc.FC_FILE, 0, &file_value)
 			!= fc.FcResultMatch) {
@@ -103,27 +104,35 @@ pub const Face = struct {
 		} else index = index_value.u.i;
 		if (fc.FcPatternGet(pattern, fc.FC_SIZE, 0, &size_value)
 			!= fc.FcResultMatch) {
-			logger.warn("font has no size, defaulting to 12pt", .{});
+			logger.warn("font has no size, defaulting to 16px", .{});
 		} else size = size_value.u.d;
 		logger.debug(
 			\\found font:
 			\\  file: {s},
 			\\  index: {},
-			\\  size: {}px
-			, .{ file, index, size });
+			\\  size: {}pt = {}px at {} dpi
+			, .{
+				file,
+				index,
+				size, size * @as(f64, @floatFromInt(dpi)) / 72, dpi,
+			});
 
 		var face: ft.FT_Face = undefined;
 		if (ft.FT_New_Face(ft_lib, @constCast(file.ptr), index, &face) != 0)
 			return error.OpenFailed;
 
 		if (ft.FT_Set_Char_Size(face,
-				0, @intFromFloat(size * 64), 0, config.dpi) != 0)
+				@intFromFloat(size * 64), 0, dpi, 0) != 0)
 			return error.OpenFailed;
 
 		if (ft.FT_Select_Charmap(face, ft.FT_ENCODING_UNICODE) != 0)
 			return error.OpenFailed;
 
-		return .{ .f = face };
+		return .{
+			.f = face,
+			.width = @intCast(@divFloor(face.*.max_advance_width, 64)),
+			.height = @intCast(@divFloor(face.*.height, 64)),
+		};
 	}
 	pub fn deinit(self: Face) void { _ = ft.FT_Done_Face(self.f); }
 

@@ -27,22 +27,24 @@ pub fn main() !void {
 
 	const f = try display.DisplayFont.init(allocator, config.font, .gray);
 
+	logger.info("rendering on every keypress...", .{});
 	while (true) {
-		const e = try display.getEvent();
-		switch (e.type) {
+		const event = try display.getEvent();
+		switch (event.type) {
 			.destroy => break,
-			.resize => {
+			.key => |e| {
+				if (!e.down) continue;
 				var t = try std.time.Timer.start();
 				const str = "Hello World! ";
 				var i: u32 = 0;
 				while (i < 128 * 128) : (i += 1) {
 					try w.renderChar(f, str[@mod(i, str.len)],
-						@intCast(48 + 8 * @mod(i, 128)),
-						@intCast(48 + 16 * @divFloor(i, 128)));
+						@intCast(@mod(i, 128)), @intCast(@divFloor(i, 128)));
 				}
 				w.map();
 				display.flush();
-				logger.info("{}ms for {} glyphs", .{ t.read() / 1_000_000, 128 * 128 });
+				logger.info("{}ms for {} glyphs",
+					.{ t.read() / 1_000_000, 128 * 128 });
 			},
 			else => {},
 		}

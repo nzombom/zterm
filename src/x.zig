@@ -109,12 +109,16 @@ pub const DisplayFont = struct {
 		allocator: std.mem.Allocator,
 		name: [:0]const u8, mode: font.PixelMode,
 	) FontError!DisplayFont {
+		const dpi_x = @as(f32, @floatFromInt(screen.width_in_pixels)) /
+			(@as(f32, @floatFromInt(screen.width_in_millimeters)) / 25.4);
+
 		const gs = try allocator.create(GlyphSet);
 		gs.* = GlyphSet.init(allocator);
 		return .{
 			.allocator = allocator,
 			.gs = gs,
-			.face = font.Face.init(name) catch return error.OpenFailed,
+			.face = font.Face.init(name, @intFromFloat(dpi_x))
+				catch return error.OpenFailed,
 			.mode = mode,
 		};
 	}
@@ -138,6 +142,13 @@ pub const DisplayFont = struct {
 		};
 	}
 };
+
+fn xcbrColorFromHex(c: u32) xcb.xcb_render_color_t { return .{
+	.alpha = @as(u16, @intCast(c >> 24)) * 256,
+	.red = @as(u16, @intCast((c >> 16) % 256)) * 256,
+	.green = @as(u16, @intCast((c >> 8) % 256)) * 256,
+	.blue = @as(u16, @intCast(c % 256)) * 256,
+}; }
 
 pub const WindowID = xcb.xcb_window_t;
 pub const Window = struct {
@@ -181,12 +192,9 @@ pub const Window = struct {
 			w.pen, w.pen_pixmap, render_formats[2].id,
 			xcb.XCB_RENDER_CP_REPEAT, &xcb.XCB_RENDER_REPEAT_NORMAL);
 		_ = xcb.xcb_render_fill_rectangles(connection,
-			xcb.XCB_RENDER_PICT_OP_SRC, w.pen, .{
-				.alpha = (config.foreground_color >> 24) * 256,
-				.red = (config.foreground_color >> 16) % 256 * 256,
-				.green = (config.foreground_color >> 8) % 256 * 256,
-				.blue = config.foreground_color % 256 * 256,
-			}, 1, &.{ .x = 0, .y = 0, .width = 1, .height = 1 });
+			xcb.XCB_RENDER_PICT_OP_SRC, w.pen,
+			xcbrColorFromHex(config.foreground_color),
+			1, &.{ .x = 0, .y = 0, .width = 1, .height = 1 });
 
 		return w;
 	}
@@ -202,7 +210,7 @@ pub const Window = struct {
 
 	fn renderBitmap(
 		self: Window, bitmap: PreparedBitmap, x: i16, y: i16,
-	) FontError!void {
+	) void {
 		if (bitmap.bitmap.w == 0 or bitmap.bitmap.h == 0) return;
 		_ = xcb.xcb_render_composite(connection, xcb.XCB_RENDER_PICT_OP_OVER,
 			self.pen, bitmap.picture, self.picture,
@@ -211,8 +219,19 @@ pub const Window = struct {
 	}
 
 	pub fn renderChar(
-		self: Window, df: DisplayFont, c: u32, x: i16, y: i16
-	) FontError!void { try self.renderBitmap(try df.getGlyphFromChar(c), x, y); }
+		self: Window, df: DisplayFont, c: u32, cx: u16, cy: u16,
+	) FontError!void {
+		_ = xcb.xcb_render_fill_rectangles(connection,
+			xcb.XCB_RENDER_PICT_OP_SRC, self.picture,
+			xcbrColorFromHex(config.background_color), 1, &.{
+				.x = @intCast(cx * df.face.width),
+				.y = @intCast(cy * df.face.height),
+				.width = @intCast(df.face.width),
+				.height = @intCast(df.face.height),
+			});
+		self.renderBitmap(try df.getGlyphFromChar(c),
+			@intCast(cx * df.face.width), @intCast((cy + 1) * df.face.height));
+	}
 };
 
 pub const Event = struct {
