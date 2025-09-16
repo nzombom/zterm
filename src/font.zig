@@ -106,16 +106,6 @@ pub const Face = struct {
 			!= fc.FcResultMatch) {
 			logger.warn("font has no size, defaulting to 16px", .{});
 		} else size = size_value.u.d;
-		logger.debug(
-			\\found font:
-			\\  file: {s},
-			\\  index: {},
-			\\  size: {}pt = {}px at {} dpi
-			, .{
-				file,
-				index,
-				size, size * @as(f64, @floatFromInt(dpi)) / 72, dpi,
-			});
 
 		var face: ft.FT_Face = undefined;
 		if (ft.FT_New_Face(ft_lib, @constCast(file.ptr), index, &face) != 0)
@@ -128,10 +118,22 @@ pub const Face = struct {
 		if (ft.FT_Select_Charmap(face, ft.FT_ENCODING_UNICODE) != 0)
 			return error.OpenFailed;
 
+		logger.debug(
+			\\found font:
+			\\  file: {s},
+			\\  index: {},
+			\\  size: {}pt = {}px at {} dpi
+			\\  dimensions: {}x{} (px)
+			, .{
+				file,
+				index,
+				size, size * @as(f64, @floatFromInt(dpi)) / 72, dpi,
+				face.*.max_advance_width >> 6, face.*.height >> 6,
+			});
 		return .{
 			.f = face,
-			.width = @intCast(@divFloor(face.*.max_advance_width, 64)),
-			.height = @intCast(@divFloor(face.*.height, 64)),
+			.width = @intCast(face.*.max_advance_width >> 6),
+			.height = @intCast(face.*.height >> 6),
 		};
 	}
 	pub fn deinit(self: Face) void { _ = ft.FT_Done_Face(self.f); }
