@@ -166,8 +166,7 @@ pub const Face = struct {
 		const data = try allocator.alloc(u8, pitch * bmp.rows);
 
 		const bmp_pitch: u32 = @abs(bmp.pitch);
-		var i: u32 = 0;
-		while (i < bmp.rows) : (i += 1) {
+		for (0..bmp.rows) |i| {
 			const y = if (bmp.pitch > 0) i else bmp.rows - i;
 			@memcpy(data[pitch * y .. pitch * y + pitch],
 				bmp.buffer[bmp_pitch * y .. bmp_pitch * y + pitch]);

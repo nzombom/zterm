@@ -26,6 +26,7 @@ pub fn main() !void {
 	display.flush();
 
 	const f = try display.DisplayFont.init(allocator, config.font, .gray);
+	defer f.deinit();
 
 	logger.info("rendering on every keypress...", .{});
 	while (true) {
@@ -49,5 +50,13 @@ pub fn main() !void {
 			else => {},
 		}
 		display.flush();
+	}
+
+	const p = try Pty.init(allocator, "sh", &.{ "sh", "-c", "echo " });
+	defer p.deinit(allocator);
+	while (true) {
+		std.debug.print("{x} ", .{ p.readChar() catch {
+			std.debug.print("\n", .{}); break;
+		} });
 	}
 }

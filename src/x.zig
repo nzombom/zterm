@@ -122,8 +122,9 @@ pub const DisplayFont = struct {
 			.mode = mode,
 		};
 	}
-	pub fn deinit(self: *DisplayFont) void {
-		for (self.gs.iterator().values) |g| g.deinit();
+	pub fn deinit(self: DisplayFont) void {
+		var it = self.gs.iterator();
+		while (it.next()) |g| g.value_ptr.deinit();
 		self.gs.deinit();
 		self.allocator.destroy(self.gs);
 		self.face.deinit();

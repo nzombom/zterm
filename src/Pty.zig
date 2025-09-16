@@ -2,16 +2,25 @@
 const Pty = @This();
 
 const std = @import("std");
+const char = @import("char.zig");
 const pty_h = @cImport(@cInclude("pty.h"));
 
-pub const InitError = error { OpenFailed, ForkFailed };
+pub const InitError = error { OpenFailed, ForkFailed, OutOfMemory };
 pub const ReadError = error { EndOfStream, ReadFailed };
 pub const WriteError = error { EndOfStream, WriteFailed };
 
 m: std.fs.File,
 
-pub fn open(command: [*:0]const u8,
-	argv: [*:null]const ?[*:0]const u8) InitError!Pty {
+/// object remembers one byte for utf-8 error handling. when a byte is supposed
+/// to be a continuation but is not, the extra byte is stored here with
+/// .returnByte()
+byte: *?u8,
+
+pub fn init(
+	allocator: std.mem.Allocator,
+	command: [*:0]const u8,
+	argv: [*:null]const ?[*:0]const u8
+) InitError!Pty {
 	var fd: i32 = 0;
 	const pid = pty_h.forkpty(&fd, null, null, null);
 	switch (pid) {
@@ -23,13 +32,23 @@ pub fn open(command: [*:0]const u8,
 			else => {},
 	}
 	const m = std.fs.File{ .handle = fd };
-	return Pty{ .m = m };
+	const b = try allocator.create(?u8);
+	b.* = null;
+	return Pty{ .m = m, .byte = b };
 }
-pub fn close(self: *Pty) void {
+pub fn deinit(self: Pty, allocator: std.mem.Allocator) void {
+	allocator.destroy(self.byte);
 	self.m.close();
 }
 
-pub fn read(self: *Pty) ReadError!u8 {
+pub fn returnByte(self: Pty, b: u8) void { self.byte.* = b; }
+
+pub fn readByte(self: Pty) ReadError!u8 {
+	if (self.byte.* != null) {
+		const b = self.byte.*;
+		self.byte.* = null;
+		return b.?;
+	}
 	var c: u8 = undefined;
 	if (self.m.read((&c)[0..1]) catch |err| {
 		if (err == std.posix.ReadError.InputOutput)
@@ -38,27 +57,12 @@ pub fn read(self: *Pty) ReadError!u8 {
 	} != 1) return ReadError.EndOfStream;
 	return c;
 }
-pub fn readStr(self: *Pty, n: u8) ReadError![]u8 {
-	var c: [256]u8 = undefined;
-	if (self.m.read(c[0..n]) catch |err| {
-		if (err == std.posix.ReadError.InputOutput)
-			return ReadError.EndOfStream
-		else return ReadError.ReadFailed;
-	} != n) return ReadError.EndOfStream;
-	return c;
-}
+pub const readChar = char.readUtf8(Pty);
 
-pub fn write(self: *Pty, c: u8) WriteError!void {
+pub fn writeByte(self: Pty, c: u8) WriteError!void {
 	if (self.m.write((&c)[0..1]) catch |err| {
 		if (err == std.posix.WriteError.InputOutput)
 			return WriteError.EndOfStream
 		else return WriteError.WriteFailed;
 	} != 1) return WriteError.EndOfStream;
-}
-pub fn writeStr(self: *Pty, c: []u8) WriteError!void {
-	if (self.m.write(c) catch |err| {
-		if (err == std.posix.WriteError.InputOutput)
-			return WriteError.EndOfStream
-		else return WriteError.WriteFailed;
-	} != c.len) return WriteError.EndOfStream;
 }
