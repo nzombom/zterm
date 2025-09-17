@@ -3,6 +3,7 @@ const config = @import("config.zig");
 const Pty = @import("Pty.zig");
 const display = @import("x.zig");
 const font = @import("font.zig");
+const char = @import("char.zig");
 
 const log = @import("log.zig");
 pub const std_options = std.Options{
@@ -55,8 +56,8 @@ pub fn main() !void {
 	const p = try Pty.init(allocator, "sh", &.{ "sh", "-c", "echo " });
 	defer p.deinit(allocator);
 	while (true) {
-		std.debug.print("{x} ", .{ p.readChar() catch {
+		std.debug.print("{x} ", .{ char.charCode(p.readChar() catch {
 			std.debug.print("\n", .{}); break;
-		} });
+		}) });
 	}
 }

@@ -1,48 +1,72 @@
 //! utf-8 utilities
 
-pub const ReadError = error { EndOfStream, ReadFailed };
-
+/// little-endian, represents a code point
+/// (use this instead of a u24 for memory saving)
 const Char = [3]u8;
 
-/// little-endian
 pub const utf8_error: Char = .{ 0xfd, 0xff, 0x00 };
 
-pub fn charCode(c: Char) u32 {
-	return c[0] + (c[1] << 8) + (c[2] << 16);
+pub fn charCode(c: Char) u24 {
+	return @as(u24, c[0]) + (@as(u24, c[1]) << 8) + (@as(u24, c[2]) << 16);
 }
-pub fn charFromCode(c: u32) Char {
+pub fn charFromCode(c: u24) Char {
 	return .{ @truncate(c), @truncate(c >> 8), @truncate(c >> 16) };
 }
 
-/// creates function for reading utf-8 given a type with member funcs
+/// creates function for reading utf-8 given a type with member functions
 /// .readByte() and .returnByte();
-pub fn readUtf8(T: type) fn (T) ReadError!Char {
-	return struct { fn f(t: T) ReadError!Char {
+pub fn readUtf8(T: type) fn (T) T.ReadError!Char {
+	return struct { fn f(t: T) T.ReadError!Char {
 		const b = try t.readByte();
-		if (b < 0b10000000) return .{ b, 0, 0 };
-		if (b < 0b11000000) return utf8_error;
-		if (b == 0b11000000 or b == 0b11000001) return utf8_error;
-		var c: u24 = 0;
-		var cont: u8 = 0;
-		if (b < 0b11100000) {
-			cont = 1;
-			c = b & 0b00011111;
-		} else if (b < 0b11110000) {
-			cont = 2;
-			c = b & 0b00001111;
-		} else if (b < 0b11111000) {
-			cont = 3;
-			c = b & 0b00000111;
-		} else return utf8_error;
-		while (cont > 0) : (cont -= 1) {
+		var c: u24 = undefined;
+		var cont: u8 = undefined;
+		switch (b) {
+			0b00000000...0b01111111 => return .{ b, 0, 0 },
+			0b10000000...0b10111111 => return utf8_error,
+			0b11000000...0b11000001 => return utf8_error,
+			0b11000010...0b11011111 => { cont = 1; c = b & 0b00011111; },
+			0b11100000...0b11101111 => { cont = 2; c = b & 0b00001111; },
+			0b11110000...0b11110111 => { cont = 3; c = b & 0b00000111; },
+			0b11111000...0b11111111 => return utf8_error,
+		}
+		var left = cont;
+		while (left > 0) : (left -= 1) {
 			const next = try t.readByte();
-			if (next >> 6 != 0b10) {
-				t.returnByte(next);
-				return utf8_error;
-			}
+			if (next >> 6 != 0b10) { t.returnByte(next); return utf8_error; }
 			c <<= 6;
 			c += next & 0b00111111;
 		}
+		// avoid "overlong encodings" (error per wikipedia)
+		if (c < @as(u24, switch (cont) {
+			1 => 0x000080, 2 => 0x000800, 3 => 0x010000,
+			else => unreachable,
+		})) return utf8_error;
 		return charFromCode(c);
+	} }.f;
+}
+
+/// creeates function for writing utf-8 given a type with member function
+/// .writeByte()
+pub fn writeUtf8(T: type) fn (T, Char) T.WriteError!void {
+	return struct { fn f(t: T, ch: Char) T.WriteError!void {
+		const c = charCode(ch);
+		switch (c) {
+			0x000000...0x00007F => try t.writeByte(@truncate(c)),
+			0x000080...0x0007FF => {
+				try t.writeByte(0b11000000 + @as(u5, @truncate(c >> 6)));
+				try t.writeByte(0b10000000 + @as(u6, @truncate(c)));
+			},
+			0x000800...0x00FFFF => {
+				try t.writeByte(0b11100000 + @as(u4, @truncate(c >> 12)));
+				try t.writeByte(0b10000000 + @as(u6, @truncate(c >> 6)));
+				try t.writeByte(0b10000000 + @as(u6, @truncate(c)));
+			},
+			else => {
+				try t.writeByte(0b11110000 + @as(u3, @truncate(c >> 18)));
+				try t.writeByte(0b10000000 + @as(u6, @truncate(c >> 12)));
+				try t.writeByte(0b10000000 + @as(u6, @truncate(c >> 6)));
+				try t.writeByte(0b10000000 + @as(u6, @truncate(c)));
+			}
+		}
 	} }.f;
 }

@@ -66,3 +66,4 @@ pub fn writeByte(self: Pty, c: u8) WriteError!void {
 		else return WriteError.WriteFailed;
 	} != 1) return WriteError.EndOfStream;
 }
+pub const writeChar = char.writeUtf8(Pty);
