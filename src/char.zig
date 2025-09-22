@@ -1,15 +1,15 @@
 //! utf-8 utilities
 
 /// little-endian, represents a code point
-/// (use this instead of a u24 for memory saving)
+/// (use this instead of a u21 for memory saving, as a u21 needs 4 bytes)
 const Char = [3]u8;
 
 pub const utf8_error: Char = .{ 0xfd, 0xff, 0x00 };
 
-pub fn charCode(c: Char) u24 {
-	return @as(u24, c[0]) + (@as(u24, c[1]) << 8) + (@as(u24, c[2]) << 16);
+pub fn charCode(c: Char) u21 {
+	return @as(u21, c[0]) + (@as(u21, c[1]) << 8) + (@as(u21, c[2]) << 16);
 }
-pub fn charFromCode(c: u24) Char {
+pub fn charFromCode(c: u21) Char {
 	return .{ @truncate(c), @truncate(c >> 8), @truncate(c >> 16) };
 }
 
@@ -18,8 +18,8 @@ pub fn charFromCode(c: u24) Char {
 pub fn readUtf8(T: type) fn (T) T.ReadError!Char {
 	return struct { fn f(t: T) T.ReadError!Char {
 		const b = try t.readByte();
-		var c: u24 = undefined;
-		var cont: u8 = undefined;
+		var c: u21 = undefined;
+		var cont: u2 = 0;
 		switch (b) {
 			0b00000000...0b01111111 => return .{ b, 0, 0 },
 			0b10000000...0b10111111 => return utf8_error,
@@ -29,18 +29,23 @@ pub fn readUtf8(T: type) fn (T) T.ReadError!Char {
 			0b11110000...0b11110111 => { cont = 3; c = b & 0b00000111; },
 			0b11111000...0b11111111 => return utf8_error,
 		}
-		var left = cont;
-		while (left > 0) : (left -= 1) {
+
+		var i: u2 = 0;
+		while (i < cont) : (i += 1) {
 			const next = try t.readByte();
 			if (next >> 6 != 0b10) { t.returnByte(next); return utf8_error; }
 			c <<= 6;
 			c += next & 0b00111111;
 		}
+
 		// avoid "overlong encodings" (error per wikipedia)
-		if (c < @as(u24, switch (cont) {
+		if (c < @as(u21, switch (cont) {
 			1 => 0x000080, 2 => 0x000800, 3 => 0x010000,
 			else => unreachable,
 		})) return utf8_error;
+		// avoid surrogate pairs
+		if (c > 0xD800 and c < 0xE000) return utf8_error;
+
 		return charFromCode(c);
 	} }.f;
 }
