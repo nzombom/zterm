@@ -51,6 +51,8 @@ pub fn init() DisplayError!void {
 		xcb.xcb_render_util_find_standard_format(
 			formats_query, xcb.XCB_PICT_STANDARD_RGB_24),
 	};
+
+	logger.debug("established xcb connection on screen {}", .{ screen_n });
 }
 pub fn deinit() void { xcb.xcb_disconnect(connection); }
 pub fn flush() void { _ = xcb.xcb_flush(connection); }
@@ -252,10 +254,7 @@ inline fn castEvent(T: type, e: *xcb.xcb_generic_event_t) *T {
 	return @as(*T, @ptrCast(e));
 }
 
-pub fn getEvent() DisplayError!Event {
-	var event: *xcb.xcb_generic_event_t = undefined;
-	event = xcb.xcb_wait_for_event(connection)
-		orelse return error.DoesNotExist;
+fn eventFromXcb(event: *xcb.xcb_generic_event_t) Event {
 	switch (event.response_type) {
 		0 => {
 			const err = castEvent(xcb.xcb_generic_error_t, event);
@@ -295,4 +294,14 @@ pub fn getEvent() DisplayError!Event {
 		},
 		else => return Event{ .type = .unknown, .w_id = null },
 	}
+}
+
+pub fn pollEvent() ?Event {
+	const event = xcb.xcb_wait_for_event(connection) orelse return null;
+	return eventFromXcb(event);
+}
+pub fn waitEvent() DisplayError!Event {
+	const event = xcb.xcb_wait_for_event(connection)
+		orelse return error.DoesNotExist;
+	return eventFromXcb(event);
 }

@@ -43,6 +43,12 @@ pub fn deinit(self: Pty, allocator: std.mem.Allocator) void {
 
 pub fn returnByte(self: Pty, b: u8) void { self.byte.* = b; }
 
+pub fn readable(self: Pty) ReadError!bool {
+	var c: i32 = undefined;
+	if (std.c.ioctl(self.m.handle, std.c.T.FIONREAD, &c) < 0)
+		return error.ReadFailed;
+	return c > 0;
+}
 pub fn readByte(self: Pty) ReadError!u8 {
 	if (self.byte.* != null) {
 		const b = self.byte.*;

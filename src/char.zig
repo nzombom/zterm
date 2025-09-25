@@ -2,16 +2,18 @@
 
 /// little-endian, represents a code point
 /// (use this instead of a u21 for memory saving, as a u21 needs 4 bytes)
-const Char = [3]u8;
+pub const Char = [3]u8;
 
 pub const utf8_error: Char = .{ 0xfd, 0xff, 0x00 };
 
-pub fn charCode(c: Char) u21 {
+pub fn toCode(c: Char) u21 {
 	return @as(u21, c[0]) + (@as(u21, c[1]) << 8) + (@as(u21, c[2]) << 16);
 }
-pub fn charFromCode(c: u21) Char {
+pub fn fromCode(c: u21) Char {
 	return .{ @truncate(c), @truncate(c >> 8), @truncate(c >> 16) };
 }
+
+pub const null_char: Char = .{ 0, 0, 0 };
 
 /// creates function for reading utf-8 given a type with member functions
 /// .readByte() and .returnByte();
@@ -46,7 +48,7 @@ pub fn readUtf8(T: type) fn (T) T.ReadError!Char {
 		// avoid surrogate pairs
 		if (c > 0xD800 and c < 0xE000) return utf8_error;
 
-		return charFromCode(c);
+		return fromCode(c);
 	} }.f;
 }
 
@@ -54,7 +56,7 @@ pub fn readUtf8(T: type) fn (T) T.ReadError!Char {
 /// .writeByte()
 pub fn writeUtf8(T: type) fn (T, Char) T.WriteError!void {
 	return struct { fn f(t: T, ch: Char) T.WriteError!void {
-		const c = charCode(ch);
+		const c = toCode(ch);
 		switch (c) {
 			0x000000...0x00007F => try t.writeByte(@truncate(c)),
 			0x000080...0x0007FF => {

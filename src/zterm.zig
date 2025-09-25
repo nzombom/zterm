@@ -4,6 +4,7 @@ const Pty = @import("Pty.zig");
 const display = @import("x.zig");
 const font = @import("font.zig");
 const char = @import("char.zig");
+const screen = @import("screen.zig");
 
 const log = @import("log.zig");
 pub const std_options = std.Options{
@@ -14,13 +15,28 @@ const logger = std.log.scoped(.main);
 
 const allocator = std.heap.smp_allocator;
 
-pub fn main() !void {
+var s: screen.Screen = undefined;
+var w: display.Window = undefined;
+
+fn runScr() anyerror!void {
+	const p = try Pty.init(allocator, "sh", &.{ "sh" });
+	defer p.deinit(allocator);
+
+	s = try screen.Screen.init(allocator, 80, 60);
+	defer s.deinit();
+
+	while (true) {
+		s.putChar(p.readChar() catch break);
+	}
+}
+
+pub fn main() anyerror!void {
 	try font.init();
 	defer font.deinit();
 	try display.init();
 	defer display.deinit();
 
-	const w = try display.Window.open(config.default_width,
+	w = try display.Window.open(config.default_width,
 		config.default_height);
 	defer w.close();
 	w.map();
@@ -29,35 +45,20 @@ pub fn main() !void {
 	const f = try display.DisplayFont.init(allocator, config.font, .gray);
 	defer f.deinit();
 
-	logger.info("rendering on every keypress...", .{});
+	const scrThread = try std.Thread.spawn(.{}, runScr, .{});
+	scrThread.detach();
+
 	while (true) {
-		const event = try display.getEvent();
+		const event = try display.waitEvent();
 		switch (event.type) {
 			.destroy => break,
-			.key => |e| {
-				if (!e.down) continue;
-				var t = try std.time.Timer.start();
-				const str = "Hello World! ";
-				var i: u32 = 0;
-				while (i < 128 * 128) : (i += 1) {
-					try w.renderChar(f, str[@mod(i, str.len)],
-						@intCast(@mod(i, 128)), @intCast(@divFloor(i, 128)));
-				}
+			.expose => {
+				try s.draw(display.Window.renderChar, .{ w, f });
 				w.map();
 				display.flush();
-				logger.info("{}ms for {} glyphs",
-					.{ t.read() / 1_000_000, 128 * 128 });
 			},
 			else => {},
 		}
 		display.flush();
-	}
-
-	const p = try Pty.init(allocator, "sh", &.{ "sh", "-c", "echo " });
-	defer p.deinit(allocator);
-	while (true) {
-		std.debug.print("{x} ", .{ char.charCode(p.readChar() catch {
-			std.debug.print("\n", .{}); break;
-		}) });
 	}
 }
