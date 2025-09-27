@@ -4,7 +4,7 @@ const Pty = @import("Pty.zig");
 const display = @import("x.zig");
 const font = @import("font.zig");
 const char = @import("char.zig");
-const screen = @import("screen.zig");
+const Screen = @import("Screen.zig");
 
 const log = @import("log.zig");
 pub const std_options = std.Options{
@@ -15,18 +15,19 @@ const logger = std.log.scoped(.main);
 
 const allocator = std.heap.smp_allocator;
 
-var s: screen.Screen = undefined;
+var s: Screen = undefined;
 var w: display.Window = undefined;
 
 fn runScr() anyerror!void {
 	const p = try Pty.init(allocator, "sh", &.{ "sh" });
 	defer p.deinit(allocator);
 
-	s = try screen.Screen.init(allocator, 80, 60);
+	s = try Screen.init(allocator, 80, 60);
 	defer s.deinit();
 
 	while (true) {
-		s.putChar(p.readChar() catch break);
+		const c = p.readChar() catch break;
+		s.putChar(c);
 	}
 }
 
@@ -53,6 +54,7 @@ pub fn main() anyerror!void {
 		switch (event.type) {
 			.destroy => break,
 			.expose => {
+				s.prepareRedraw();
 				try s.draw(display.Window.renderChar, .{ w, f });
 				w.map();
 				display.flush();

@@ -1,3 +1,5 @@
+//! functions for rendering fonts to bitmaps
+
 const std = @import("std");
 const config = @import("config.zig");
 const fc = @cImport(@cInclude("fontconfig/fontconfig.h"));
@@ -68,7 +70,12 @@ pub const Bitmap = struct {
 
 pub const Face = struct {
 	f: ft.FT_Face,
-	width: u16, height: u16,
+	width: u16,
+	/// the total height in pixels of a glyph, including ascenders & descenders
+	/// so no glyphs overlap
+	height: u16,
+	/// baseline position, in pixels from the top of the cell
+	baseline: u16,
 
 	/// load a face given a fontconfig string
 	pub fn init(query: [:0]const u8, dpi: u16) LoadError!Face {
@@ -118,24 +125,29 @@ pub const Face = struct {
 		if (ft.FT_Select_Charmap(face, ft.FT_ENCODING_UNICODE) != 0)
 			return error.OpenFailed;
 
+		const px_width: u16 = @intCast(face.*.size.*.metrics.max_advance >> 6);
+		const px_height: u16 = @intCast((face.*.size.*.metrics.ascender
+			- face.*.size.*.metrics.descender) >> 6);
+		const px_baseline: u16 = @intCast(face.*.size.*.metrics.ascender >> 6);
+
 		logger.debug(
 			\\found font:
 			\\  file: {s},
 			\\  index: {},
 			\\  size: {}pt = {}px at {} dpi
-			\\  dimensions: {}x{} (px)
+			\\  dimensions: {}x{} (px), baseline {}px
 			, .{
-				file,
-				index,
-				size, size * @as(f64, @floatFromInt(dpi)) / 72, dpi,
-				face.*.max_advance_width >> 6, face.*.height >> 6,
+				file, index,
+				size, @as(u16, @intFromFloat(size)) * dpi / 72, dpi,
+				px_width, px_height, px_baseline,
 			});
 		return .{
 			.f = face,
-			.width = @intCast(face.*.max_advance_width >> 6),
-			.height = @intCast(face.*.height >> 6),
+			.width = px_width, .height = px_height,
+			.baseline = px_baseline,
 		};
 	}
+
 	pub fn deinit(self: Face) void { _ = ft.FT_Done_Face(self.f); }
 
 	pub fn getCharGlyphIndex(self: Face, c: u32) u32 {

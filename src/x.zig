@@ -232,8 +232,11 @@ pub const Window = struct {
 				.width = @intCast(df.face.width),
 				.height = @intCast(df.face.height),
 			});
-		self.renderBitmap(try df.getGlyphFromChar(c),
-			@intCast(cx * df.face.width), @intCast((cy + 1) * df.face.height));
+		self.renderBitmap(
+			try df.getGlyphFromChar(c),
+			@intCast(cx * df.face.width),
+			@intCast(cy * df.face.height + df.face.baseline)
+		);
 	}
 };
 
@@ -300,6 +303,7 @@ pub fn pollEvent() ?Event {
 	const event = xcb.xcb_wait_for_event(connection) orelse return null;
 	return eventFromXcb(event);
 }
+
 pub fn waitEvent() DisplayError!Event {
 	const event = xcb.xcb_wait_for_event(connection)
 		orelse return error.DoesNotExist;

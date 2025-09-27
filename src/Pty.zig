@@ -5,7 +5,7 @@ const std = @import("std");
 const char = @import("char.zig");
 const pty_h = @cImport(@cInclude("pty.h"));
 
-pub const InitError = error { OpenFailed, ForkFailed, OutOfMemory };
+pub const InitError = error { OutOfMemory, OpenFailed, ForkFailed };
 pub const ReadError = error { EndOfStream, ReadFailed };
 pub const WriteError = error { EndOfStream, WriteFailed };
 
