@@ -31,11 +31,12 @@ pub fn init(
 			},
 			else => {},
 	}
-	const m = std.fs.File{ .handle = fd };
+	const m: std.fs.File = .{ .handle = fd };
 	const b = try allocator.create(?u8);
 	b.* = null;
-	return Pty{ .m = m, .byte = b };
+	return .{ .m = m, .byte = b };
 }
+
 pub fn deinit(self: Pty, allocator: std.mem.Allocator) void {
 	allocator.destroy(self.byte);
 	self.m.close();
@@ -49,6 +50,7 @@ pub fn readable(self: Pty) ReadError!bool {
 		return error.ReadFailed;
 	return c > 0;
 }
+
 pub fn readByte(self: Pty) ReadError!u8 {
 	if (self.byte.* != null) {
 		const b = self.byte.*;
@@ -63,6 +65,7 @@ pub fn readByte(self: Pty) ReadError!u8 {
 	} != 1) return ReadError.EndOfStream;
 	return c;
 }
+
 pub const readChar = char.readUtf8(Pty);
 
 pub fn writeByte(self: Pty, c: u8) WriteError!void {
@@ -72,4 +75,5 @@ pub fn writeByte(self: Pty, c: u8) WriteError!void {
 		else return WriteError.WriteFailed;
 	} != 1) return WriteError.EndOfStream;
 }
+
 pub const writeChar = char.writeUtf8(Pty);

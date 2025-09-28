@@ -44,7 +44,7 @@ pub fn readUtf8(T: type) fn (T) T.ReadError!Char {
 		if (c < @as(u21, switch (cont) {
 			1 => 0x000080, 2 => 0x000800, 3 => 0x010000,
 			else => unreachable,
-		})) return utf8_error;
+			})) return utf8_error;
 		// avoid surrogate pairs
 		if (c > 0xD800 and c < 0xE000) return utf8_error;
 

@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const config = @import("config.zig");
+const char = @import("char.zig");
 const font = @import("font.zig");
 const xcb = @cImport({
 	@cInclude("xcb/xcb.h");
@@ -15,9 +16,11 @@ var connection: *xcb.xcb_connection_t = undefined;
 var screen: *xcb.xcb_screen_t = undefined;
 var render_formats: [3]*xcb.xcb_render_pictforminfo_t = undefined;
 
-pub const DisplayError = error { InitFailed, DoesNotExist };
-pub const WindowError = error { OpenFailed };
-pub const FontError = error { OutOfMemory, OpenFailed, RenderFailed };
+pub const Error = error {
+	OutOfMemory,
+	InitFailed, ConnectionClosed,
+	WindowOpenFailed, FontOpenFailed, RenderGlyphFailed,
+};
 
 fn checkXcb(req: xcb.xcb_void_cookie_t, err: anytype) @TypeOf(err)!void {
 	const e = xcb.xcb_request_check(connection, req);
@@ -30,10 +33,10 @@ fn checkXcb(req: xcb.xcb_void_cookie_t, err: anytype) @TypeOf(err)!void {
 	}
 }
 
-pub fn init() DisplayError!void {
+pub fn init() Error!void {
 	var screen_n: i32 = undefined;
 	connection = xcb.xcb_connect(null, &screen_n)
-		orelse return DisplayError.InitFailed;
+		orelse return Error.InitFailed;
 	const setup = xcb.xcb_get_setup(connection);
 	var screen_iter = xcb.xcb_setup_roots_iterator(setup);
 	var i: u32 = 0;
@@ -50,7 +53,7 @@ pub fn init() DisplayError!void {
 			formats_query, xcb.XCB_PICT_STANDARD_A_8),
 		xcb.xcb_render_util_find_standard_format(
 			formats_query, xcb.XCB_PICT_STANDARD_RGB_24),
-	};
+		};
 
 	logger.debug("established xcb connection on screen {}", .{ screen_n });
 }
@@ -58,11 +61,14 @@ pub fn deinit() void { xcb.xcb_disconnect(connection); }
 pub fn flush() void { _ = xcb.xcb_flush(connection); }
 
 const PreparedBitmap = struct {
+	bitmap: font.Bitmap,
+
 	// if bitmap is zero-size
 	// then pixmap and picture are not guaranteed to exist
+	/// opaque
 	pixmap: xcb.xcb_pixmap_t,
+	/// opaque
 	picture: xcb.xcb_render_picture_t,
-	bitmap: font.Bitmap,
 
 	pub fn init(
 		allocator: std.mem.Allocator, bitmap: font.Bitmap,
@@ -71,7 +77,7 @@ const PreparedBitmap = struct {
 			.pixmap = 0, .picture = 0, .bitmap = bitmap,
 		};
 
-		const prepared = PreparedBitmap{
+		const prepared: PreparedBitmap = .{
 			.pixmap = xcb.xcb_generate_id(connection),
 			.picture = xcb.xcb_generate_id(connection),
 			.bitmap = bitmap,
@@ -99,48 +105,52 @@ const PreparedBitmap = struct {
 		_ = xcb.xcb_free_pixmap(connection, self.pixmap);
 	}
 };
-const GlyphSet = std.AutoArrayHashMap(u32, PreparedBitmap);
+
+const GlyphSet = std.AutoArrayHashMapUnmanaged(u32, PreparedBitmap);
 
 pub const DisplayFont = struct {
 	allocator: std.mem.Allocator,
-	gs: *GlyphSet,
 	face: font.Face,
 	mode: font.PixelMode,
+	/// opaque
+	gs: *GlyphSet,
 
 	pub fn init(
 		allocator: std.mem.Allocator,
 		name: [:0]const u8, mode: font.PixelMode,
-	) FontError!DisplayFont {
+	) Error!DisplayFont {
 		const dpi_x = @as(f32, @floatFromInt(screen.width_in_pixels)) /
 			(@as(f32, @floatFromInt(screen.width_in_millimeters)) / 25.4);
 
-		const gs = try allocator.create(GlyphSet);
-		gs.* = GlyphSet.init(allocator);
-		return .{
+		const df: DisplayFont = .{
 			.allocator = allocator,
-			.gs = gs,
 			.face = font.Face.init(name, @intFromFloat(dpi_x))
-				catch return error.OpenFailed,
+				catch return error.FontOpenFailed,
 			.mode = mode,
+			.gs = try allocator.create(GlyphSet),
 		};
+		df.gs.* = .empty;
+		return df;
 	}
+
 	pub fn deinit(self: DisplayFont) void {
 		var it = self.gs.iterator();
 		while (it.next()) |g| g.value_ptr.deinit();
-		self.gs.deinit();
+		self.gs.deinit(self.allocator);
 		self.allocator.destroy(self.gs);
 		self.face.deinit();
 	}
 
 	pub fn getGlyphFromChar(
-		self: DisplayFont, c: u32
-	) FontError!PreparedBitmap {
-		return self.gs.get(c) orelse {
+		self: DisplayFont, c: char.Char,
+	) Error!PreparedBitmap {
+		const code = char.toCode(c);
+		return self.gs.get(code) orelse {
 			const g = PreparedBitmap.init(self.allocator,
 				self.face.renderGlyph(self.allocator,
-					self.face.getCharGlyphIndex(c), self.mode)
-				catch return error.RenderFailed);
-			try self.gs.put(c, g);
+					self.face.getCharGlyphIndex(code), self.mode)
+				catch return error.RenderGlyphFailed);
+			try self.gs.put(self.allocator, code, g);
 			return g;
 		};
 	}
@@ -154,19 +164,52 @@ fn xcbrColorFromHex(c: u32) xcb.xcb_render_color_t { return .{
 }; }
 
 pub const WindowID = xcb.xcb_window_t;
-pub const Window = struct {
-	id: WindowID,
-	picture: xcb.xcb_render_picture_t,
-	pen_pixmap: xcb.xcb_pixmap_t,
-	pen: xcb.xcb_render_picture_t,
 
-	pub fn open(width: u16, height: u16) WindowError!Window {
-		const w = Window{
+pub const Window = struct {
+	allocator: std.mem.Allocator,
+	id: WindowID,
+	/// opaque
+	picture: xcb.xcb_render_picture_t,
+	/// opaque
+	colors: *ColorMap,
+
+	const Color = struct {
+		pixmap: xcb.xcb_pixmap_t,
+		picture: xcb.xcb_render_picture_t,
+	};
+
+	const ColorMap = std.AutoArrayHashMapUnmanaged(u32, Color);
+
+	fn getColor(self: Window, hex: u32) Error!Color {
+		return self.colors.get(hex) orelse {
+			const c: Color = .{
+				.pixmap = xcb.xcb_generate_id(connection),
+				.picture = xcb.xcb_generate_id(connection),
+			};
+			_ = xcb.xcb_create_pixmap(connection, 24, c.pixmap, self.id, 1, 1);
+			_ = xcb.xcb_render_create_picture(connection,
+				c.picture, c.pixmap, render_formats[2].id,
+				xcb.XCB_RENDER_CP_REPEAT, &xcb.XCB_RENDER_REPEAT_NORMAL);
+			_ = xcb.xcb_render_fill_rectangles(connection,
+				xcb.XCB_RENDER_PICT_OP_SRC, c.picture,
+				xcbrColorFromHex(hex),
+				1, &.{ .x = 0, .y = 0, .width = 1, .height = 1 });
+			try self.colors.put(self.allocator, hex, c);
+			return c;
+		};
+	}
+
+	pub fn open(
+		allocator: std.mem.Allocator,
+		width: u16, height: u16,
+	) Error!Window {
+		const w: Window = .{
+			.allocator = allocator,
 			.id = xcb.xcb_generate_id(connection),
 			.picture = xcb.xcb_generate_id(connection),
-			.pen = xcb.xcb_generate_id(connection),
-			.pen_pixmap = xcb.xcb_generate_id(connection),
+			.colors = try allocator.create(ColorMap),
 		};
+		w.colors.* = .empty;
 
 		// create the window
 		var value_buffer: [8]u8 = undefined;
@@ -181,29 +224,25 @@ pub const Window = struct {
 				| xcb.XCB_EVENT_MASK_KEY_RELEASE,
 		});
 		try checkXcb(xcb.xcb_create_window_checked(connection, 24,
-			w.id, screen.*.root, 0, 0, width, height,
-			0, xcb.XCB_WINDOW_CLASS_INPUT_OUTPUT, screen.*.root_visual,
-			value_mask, values), error.OpenFailed);
-
+				w.id, screen.*.root, 0, 0, width, height,
+				0, xcb.XCB_WINDOW_CLASS_INPUT_OUTPUT, screen.*.root_visual,
+				value_mask, values), error.WindowOpenFailed);
 		// create the xrender picture
 		try checkXcb(xcb.xcb_render_create_picture(connection,
-			w.picture, w.id, render_formats[2].id, 0, null), error.OpenFailed);
-
-		// create the pen & set the color
-		_ = xcb.xcb_create_pixmap(connection, 24, w.pen_pixmap, w.id, 1, 1);
-		_ = xcb.xcb_render_create_picture(connection,
-			w.pen, w.pen_pixmap, render_formats[2].id,
-			xcb.XCB_RENDER_CP_REPEAT, &xcb.XCB_RENDER_REPEAT_NORMAL);
-		_ = xcb.xcb_render_fill_rectangles(connection,
-			xcb.XCB_RENDER_PICT_OP_SRC, w.pen,
-			xcbrColorFromHex(config.foreground_color),
-			1, &.{ .x = 0, .y = 0, .width = 1, .height = 1 });
+				w.picture, w.id, render_formats[2].id, 0, null),
+			error.WindowOpenFailed);
 
 		return w;
 	}
+
 	pub fn close(self: Window) void {
-		_ = xcb.xcb_render_free_picture(connection, self.pen);
-		_ = xcb.xcb_free_pixmap(connection, self.pen_pixmap);
+		var it = self.colors.iterator();
+		while (it.next()) |c| {
+			_ = xcb.xcb_free_pixmap(connection, c.value_ptr.pixmap);
+			_ = xcb.xcb_render_free_picture(connection, c.value_ptr.picture);
+		}
+		self.colors.deinit(self.allocator);
+		_ = xcb.xcb_render_free_picture(connection, self.picture);
 		_ = xcb.xcb_destroy_window(connection, self.id);
 	}
 
@@ -212,30 +251,34 @@ pub const Window = struct {
 	}
 
 	fn renderBitmap(
-		self: Window, bitmap: PreparedBitmap, x: i16, y: i16,
+		self: Window, bitmap: PreparedBitmap,
+		x: i16, y: i16, color: Color,
 	) void {
 		if (bitmap.bitmap.w == 0 or bitmap.bitmap.h == 0) return;
 		_ = xcb.xcb_render_composite(connection, xcb.XCB_RENDER_PICT_OP_OVER,
-			self.pen, bitmap.picture, self.picture,
+			color.picture, bitmap.picture, self.picture,
 			0, 0, 0, 0, x + bitmap.bitmap.x, y + bitmap.bitmap.y,
 			bitmap.bitmap.w, bitmap.bitmap.h);
 	}
 
 	pub fn renderChar(
-		self: Window, df: DisplayFont, c: u32, cx: u16, cy: u16,
-	) FontError!void {
+		self: Window, df: DisplayFont,
+		c: char.Char, cx: u16, cy: u16, bg: u32, fg: u32,
+	) Error!void {
 		_ = xcb.xcb_render_fill_rectangles(connection,
 			xcb.XCB_RENDER_PICT_OP_SRC, self.picture,
-			xcbrColorFromHex(config.background_color), 1, &.{
+			xcbrColorFromHex(bg), 1, &.{
 				.x = @intCast(cx * df.face.width),
 				.y = @intCast(cy * df.face.height),
 				.width = @intCast(df.face.width),
 				.height = @intCast(df.face.height),
 			});
+		if (std.meta.eql(c, char.null_char)) return;
 		self.renderBitmap(
 			try df.getGlyphFromChar(c),
 			@intCast(cx * df.face.width),
-			@intCast(cy * df.face.height + df.face.baseline)
+			@intCast(cy * df.face.height + df.face.baseline),
+			try self.getColor(fg),
 		);
 	}
 };
@@ -264,13 +307,13 @@ fn eventFromXcb(event: *xcb.xcb_generic_event_t) Event {
 			logger.err("xcb error {} {}:{}", .{
 				err.*.error_code, err.*.major_code, err.*.minor_code,
 			});
-			return Event { .type = .err, .w_id = null };
+			return .{ .type = .err, .w_id = null };
 		},
-		xcb.XCB_DESTROY_NOTIFY => return Event{
+		xcb.XCB_DESTROY_NOTIFY => return .{
 			.type = .destroy,
 			.w_id = castEvent(xcb.xcb_destroy_notify_event_t, event).window,
 		},
-		xcb.XCB_EXPOSE => return Event{
+		xcb.XCB_EXPOSE => return .{
 			.type = .expose,
 			.w_id = castEvent(xcb.xcb_expose_event_t, event).window,
 		},
@@ -281,21 +324,21 @@ fn eventFromXcb(event: *xcb.xcb_generic_event_t) Event {
 			} },
 			.w_id = castEvent(xcb.xcb_configure_notify_event_t, event).window,
 		},
-		xcb.XCB_KEY_PRESS => return Event{
+		xcb.XCB_KEY_PRESS => return .{
 			.type = .{ .key = .{
 				.down = true,
 				.code = castEvent(xcb.xcb_key_press_event_t, event).detail,
 			} },
 			.w_id = castEvent(xcb.xcb_key_press_event_t, event).event,
 		},
-		xcb.XCB_KEY_RELEASE => return Event{
+		xcb.XCB_KEY_RELEASE => return .{
 			.type = .{ .key = .{
 				.down = false,
 				.code = castEvent(xcb.xcb_key_release_event_t, event).detail,
 			} },
 			.w_id = castEvent(xcb.xcb_key_release_event_t, event).event,
 		},
-		else => return Event{ .type = .unknown, .w_id = null },
+		else => return .{ .type = .unknown, .w_id = null },
 	}
 }
 
@@ -304,8 +347,8 @@ pub fn pollEvent() ?Event {
 	return eventFromXcb(event);
 }
 
-pub fn waitEvent() DisplayError!Event {
+pub fn waitEvent() Error!Event {
 	const event = xcb.xcb_wait_for_event(connection)
-		orelse return error.DoesNotExist;
+		orelse return error.ConnectionClosed;
 	return eventFromXcb(event);
 }

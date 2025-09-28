@@ -1,13 +1,13 @@
 const std = @import("std");
 const config = @import("config.zig");
-const Pty = @import("Pty.zig");
+const char = @import("char.zig");
 const display = @import("x.zig");
 const font = @import("font.zig");
-const char = @import("char.zig");
+const Pty = @import("Pty.zig");
 const Screen = @import("Screen.zig");
 
 const log = @import("log.zig");
-pub const std_options = std.Options{
+pub const std_options: std.Options = .{
 	.log_level = .debug,
 	.logFn = log.logFn,
 };
@@ -22,7 +22,7 @@ fn runScr() anyerror!void {
 	const p = try Pty.init(allocator, "sh", &.{ "sh" });
 	defer p.deinit(allocator);
 
-	s = try Screen.init(allocator, 80, 60);
+	s = try Screen.init(allocator, 80, 20);
 	defer s.deinit();
 
 	while (true) {
@@ -37,14 +37,14 @@ pub fn main() anyerror!void {
 	try display.init();
 	defer display.deinit();
 
-	w = try display.Window.open(config.default_width,
-		config.default_height);
+	const f = try display.DisplayFont.init(allocator, config.font, .gray);
+	defer f.deinit();
+	w = try display.Window.open(allocator,
+		config.default_width * f.face.width,
+		config.default_height * f.face.height);
 	defer w.close();
 	w.map();
 	display.flush();
-
-	const f = try display.DisplayFont.init(allocator, config.font, .gray);
-	defer f.deinit();
 
 	const scrThread = try std.Thread.spawn(.{}, runScr, .{});
 	scrThread.detach();
@@ -55,7 +55,7 @@ pub fn main() anyerror!void {
 			.destroy => break,
 			.expose => {
 				s.prepareRedraw();
-				try s.draw(display.Window.renderChar, .{ w, f });
+				try s.draw(w, f);
 				w.map();
 				display.flush();
 			},
