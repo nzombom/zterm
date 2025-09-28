@@ -211,7 +211,6 @@ pub const Window = struct {
 		};
 		w.colors.* = .empty;
 
-		// create the window
 		var value_buffer: [8]u8 = undefined;
 		var values: ?*[8]u8 = &value_buffer;
 		const value_mask = xcb.XCB_CW_BACK_PIXEL
@@ -227,7 +226,6 @@ pub const Window = struct {
 				w.id, screen.*.root, 0, 0, width, height,
 				0, xcb.XCB_WINDOW_CLASS_INPUT_OUTPUT, screen.*.root_visual,
 				value_mask, values), error.WindowOpenFailed);
-		// create the xrender picture
 		try checkXcb(xcb.xcb_render_create_picture(connection,
 				w.picture, w.id, render_formats[2].id, 0, null),
 			error.WindowOpenFailed);
@@ -265,14 +263,10 @@ pub const Window = struct {
 		self: Window, df: DisplayFont,
 		c: char.Char, cx: u16, cy: u16, bg: u32, fg: u32,
 	) Error!void {
-		_ = xcb.xcb_render_fill_rectangles(connection,
-			xcb.XCB_RENDER_PICT_OP_SRC, self.picture,
-			xcbrColorFromHex(bg), 1, &.{
-				.x = @intCast(cx * df.face.width),
-				.y = @intCast(cy * df.face.height),
-				.width = @intCast(df.face.width),
-				.height = @intCast(df.face.height),
-			});
+		_ = xcb.xcb_render_composite(connection, xcb.XCB_RENDER_PICT_OP_SRC,
+			(try self.getColor(bg)).picture, 0, self.picture, 0, 0, 0, 0,
+			@intCast(cx * df.face.width), @intCast(cy * df.face.height),
+			@intCast(df.face.width), @intCast(df.face.height));
 		if (std.meta.eql(c, char.null_char)) return;
 		self.renderBitmap(
 			try df.getGlyphFromChar(c),

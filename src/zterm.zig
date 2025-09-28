@@ -19,7 +19,7 @@ var s: Screen = undefined;
 var w: display.Window = undefined;
 
 fn runScr() anyerror!void {
-	const p = try Pty.init(allocator, "sh", &.{ "sh" });
+	const p = try Pty.init(allocator, "sh", &.{ "sh", "-c", "cat src/config.zig; cat" });
 	defer p.deinit(allocator);
 
 	s = try Screen.init(allocator, 80, 20);
@@ -27,7 +27,7 @@ fn runScr() anyerror!void {
 
 	while (true) {
 		const c = p.readChar() catch break;
-		s.putChar(c);
+		try s.putChar(c);
 	}
 }
 
