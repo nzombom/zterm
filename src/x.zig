@@ -450,7 +450,7 @@ fn handleXcbEvent(
 }
 
 pub fn pollEvent(w: []Window) Error!?Event {
-	const event = xcb.xcb_wait_for_event(connection) orelse return null;
+	const event = xcb.xcb_poll_for_event(connection) orelse return null;
 	return try handleXcbEvent(event, w);
 }
 

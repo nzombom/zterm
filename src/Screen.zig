@@ -64,6 +64,7 @@ pub fn addLinesTop(scr: *Screen, n: u16) Error!void {
 }
 /// add n empty lines to the bottom of the screen & move the cursor up
 pub fn addLinesBottom(scr: *Screen, n: u16) Error!void {
+	scr.prepareRedraw();
 	for (0..n) |_| {
 		try scr.lines.pushFront(scr.allocator, .{
 			.c = (try scr.allocator.alloc(char.Char, scr.width)).ptr,
@@ -80,6 +81,7 @@ pub fn removeLinesTop(scr: *Screen, n: u16) void {
 }
 /// remove n lines from the bottom of the screen & move the cursor down
 pub fn removeLinesBottom(scr: *Screen, n: u16) void {
+	scr.prepareRedraw();
 	for (0..n) |_| scr.allocator.free((scr.lines.popFront()
 			orelse unreachable).c[0..scr.width]);
 	scr.cursor_y -= n;

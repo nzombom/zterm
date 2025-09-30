@@ -15,6 +15,20 @@ const logger = std.log.scoped(.main);
 
 const allocator = std.heap.smp_allocator;
 
+fn startRedraw(updated: *i64, timeout: *?u64) void {
+	const now = std.time.milliTimestamp();
+	if (timeout.* != null) {
+		const interval = @as(u64, @intCast(now - updated.*))
+			/ config.min_latency;
+		if (interval >= @as(u64, @intCast(timeout.*.?)) / config.min_latency
+			and timeout.*.? < config.max_latency)
+			timeout.*.? += config.min_latency;
+	} else {
+		timeout.* = config.min_latency;
+		updated.* = now;
+	}
+}
+
 pub fn main() anyerror!void {
 	try font.init();
 	defer font.deinit();
@@ -39,8 +53,11 @@ pub fn main() anyerror!void {
 		config.default_height);
 	defer scr.deinit();
 
-	var pty = try Pty.init("sh", &.{ "sh" });
+	var pty = try Pty.init("bash", &.{ "bash", "-c", "yes | tr '\\n' a" });
 	defer pty.deinit();
+
+	var updated: i64 = undefined;
+	var timeout: ?u64 = null;
 
 	while (true) {
 		const has_event = try display.pollEvent((&win)[0..1]);
@@ -53,11 +70,21 @@ pub fn main() anyerror!void {
 				try scr.draw(&win, &df);
 				win.draw();
 				display.flush();
+				timeout = null;
 			},
 			else => {},
 		};
 		if (try pty.readable()) {
 			try scr.putChar(try pty.readChar());
+			startRedraw(&updated, &timeout);
+		}
+		if (timeout != null) {
+			if (std.time.milliTimestamp() - updated > timeout.?) {
+				try scr.draw(&win, &df);
+				win.draw();
+				display.flush();
+				timeout = null;
+			}
 		}
 	}
 }
