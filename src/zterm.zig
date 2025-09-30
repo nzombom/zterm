@@ -15,52 +15,49 @@ const logger = std.log.scoped(.main);
 
 const allocator = std.heap.smp_allocator;
 
-var s: Screen = undefined;
-var w: display.Window = undefined;
-
-fn runScr() anyerror!void {
-	const p = try Pty.init(allocator, "sh", &.{ "sh", "-c", "cat src/config.zig; cat" });
-	defer p.deinit(allocator);
-
-	s = try Screen.init(allocator, 80, 20);
-	defer s.deinit();
-
-	while (true) {
-		const c = p.readChar() catch break;
-		try s.putChar(c);
-	}
-}
-
 pub fn main() anyerror!void {
 	try font.init();
 	defer font.deinit();
 	try display.init();
 	defer display.deinit();
 
-	const f = try display.DisplayFont.init(allocator, config.font, .gray);
-	defer f.deinit();
-	w = try display.Window.open(allocator,
-		config.default_width * f.face.width,
-		config.default_height * f.face.height);
-	defer w.close();
-	w.map();
+	var df = try display.DisplayFont.init(allocator, config.font, .gray);
+	defer df.deinit();
+	var win = try display.Window.open(allocator,
+		config.default_width * df.face.width,
+		config.default_height * df.face.height);
+	defer win.close();
+
+	win.setResizeGrid(df.face.width, df.face.height);
+	win.setTitle("zterm");
+	try win.setClass("zterm", "zterm");
+	win.draw();
 	display.flush();
 
-	const scrThread = try std.Thread.spawn(.{}, runScr, .{});
-	scrThread.detach();
+	var scr = try Screen.init(allocator,
+		config.default_width,
+		config.default_height);
+	defer scr.deinit();
+
+	var pty = try Pty.init("sh", &.{ "sh" });
+	defer pty.deinit();
 
 	while (true) {
-		const event = try display.waitEvent();
-		switch (event.type) {
+		const has_event = try display.pollEvent((&win)[0..1]);
+		if (has_event) |event| switch (event.type) {
 			.destroy => break,
-			.expose => {
-				s.prepareRedraw();
-				try s.draw(w, f);
-				w.map();
+			.resize => |resize| {
+				try scr.resize(resize.width / df.face.width,
+					resize.height / df.face.height);
+				if (resize.redraw_required) scr.prepareRedraw();
+				try scr.draw(&win, &df);
+				win.draw();
 				display.flush();
 			},
 			else => {},
+		};
+		if (try pty.readable()) {
+			try scr.putChar(try pty.readChar());
 		}
-		display.flush();
 	}
 }

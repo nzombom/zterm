@@ -2,6 +2,7 @@
 
 /// little-endian, represents a code point
 /// (use this instead of a u21 for memory saving, as a u21 needs 4 bytes)
+/// (actually not sure if this works because of alignment crap)
 pub const Char = [3]u8;
 
 pub const utf8_error: Char = .{ 0xfd, 0xff, 0x00 };
@@ -17,8 +18,8 @@ pub const null_char: Char = .{ 0, 0, 0 };
 
 /// creates function for reading utf-8 given a type with member functions
 /// .readByte() and .returnByte();
-pub fn readUtf8(T: type) fn (T) T.ReadError!Char {
-	return struct { fn f(t: T) T.ReadError!Char {
+pub fn readUtf8(T: type) fn (*T) T.ReadError!Char {
+	return struct { fn f(t: *T) T.ReadError!Char {
 		const b = try t.readByte();
 		var c: u21 = undefined;
 		var cont: u2 = 0;
@@ -54,8 +55,8 @@ pub fn readUtf8(T: type) fn (T) T.ReadError!Char {
 
 /// creeates function for writing utf-8 given a type with member function
 /// .writeByte()
-pub fn writeUtf8(T: type) fn (T, Char) T.WriteError!void {
-	return struct { fn f(t: T, ch: Char) T.WriteError!void {
+pub fn writeUtf8(T: type) fn (*T, Char) T.WriteError!void {
+	return struct { fn f(t: *T, ch: Char) T.WriteError!void {
 		const c = toCode(ch);
 		switch (c) {
 			0x000000...0x00007F => try t.writeByte(@truncate(c)),

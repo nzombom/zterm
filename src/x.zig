@@ -20,6 +20,7 @@ pub const Error = error {
 	OutOfMemory,
 	InitFailed, ConnectionClosed,
 	WindowOpenFailed, FontOpenFailed, RenderGlyphFailed,
+	WindowNotFound,
 };
 
 fn checkXcb(req: xcb.xcb_void_cookie_t, err: anytype) @TypeOf(err)!void {
@@ -70,7 +71,7 @@ const PreparedBitmap = struct {
 	/// opaque
 	picture: xcb.xcb_render_picture_t,
 
-	pub fn init(
+	fn init(
 		allocator: std.mem.Allocator, bitmap: font.Bitmap,
 	) PreparedBitmap {
 		if (bitmap.w == 0 or bitmap.h == 0) return .{
@@ -100,9 +101,9 @@ const PreparedBitmap = struct {
 		return prepared;
 	}
 
-	pub fn deinit(self: PreparedBitmap) void {
-		_ = xcb.xcb_render_free_picture(connection, self.picture);
-		_ = xcb.xcb_free_pixmap(connection, self.pixmap);
+	fn deinit(prepared: PreparedBitmap) void {
+		_ = xcb.xcb_render_free_picture(connection, prepared.picture);
+		_ = xcb.xcb_free_pixmap(connection, prepared.pixmap);
 	}
 };
 
@@ -113,7 +114,7 @@ pub const DisplayFont = struct {
 	face: font.Face,
 	mode: font.PixelMode,
 	/// opaque
-	gs: *GlyphSet,
+	gs: GlyphSet,
 
 	pub fn init(
 		allocator: std.mem.Allocator,
@@ -127,30 +128,28 @@ pub const DisplayFont = struct {
 			.face = font.Face.init(name, @intFromFloat(dpi_x))
 				catch return error.FontOpenFailed,
 			.mode = mode,
-			.gs = try allocator.create(GlyphSet),
+			.gs = .empty,
 		};
-		df.gs.* = .empty;
 		return df;
 	}
 
-	pub fn deinit(self: DisplayFont) void {
-		var it = self.gs.iterator();
+	pub fn deinit(df: *DisplayFont) void {
+		var it = df.gs.iterator();
 		while (it.next()) |g| g.value_ptr.deinit();
-		self.gs.deinit(self.allocator);
-		self.allocator.destroy(self.gs);
-		self.face.deinit();
+		df.gs.deinit(df.allocator);
+		df.face.deinit();
 	}
 
-	pub fn getGlyphFromChar(
-		self: DisplayFont, c: char.Char,
+	fn getGlyphFromChar(
+		df: *DisplayFont, c: char.Char,
 	) Error!PreparedBitmap {
 		const code = char.toCode(c);
-		return self.gs.get(code) orelse {
-			const g = PreparedBitmap.init(self.allocator,
-				self.face.renderGlyph(self.allocator,
-					self.face.getCharGlyphIndex(code), self.mode)
+		return df.gs.get(code) orelse {
+			const g = PreparedBitmap.init(df.allocator,
+				df.face.renderGlyph(df.allocator,
+					df.face.getCharGlyphIndex(code), df.mode)
 				catch return error.RenderGlyphFailed);
-			try self.gs.put(self.allocator, code, g);
+			try df.gs.put(df.allocator, code, g);
 			return g;
 		};
 	}
@@ -168,10 +167,18 @@ pub const WindowID = xcb.xcb_window_t;
 pub const Window = struct {
 	allocator: std.mem.Allocator,
 	id: WindowID,
+	width: u16, height: u16,
+	/// opaque
+	gc: xcb.xcb_gcontext_t,
+	/// opaque
+	pixmap: struct {
+		id: xcb.xcb_pixmap_t,
+		width: u16, height: u16,
+	},
 	/// opaque
 	picture: xcb.xcb_render_picture_t,
 	/// opaque
-	colors: *ColorMap,
+	colors: ColorMap,
 
 	const Color = struct {
 		pixmap: xcb.xcb_pixmap_t,
@@ -180,13 +187,134 @@ pub const Window = struct {
 
 	const ColorMap = std.AutoArrayHashMapUnmanaged(u32, Color);
 
-	fn getColor(self: Window, hex: u32) Error!Color {
-		return self.colors.get(hex) orelse {
+	pub fn open(
+		allocator: std.mem.Allocator,
+		width: u16, height: u16,
+	) Error!Window {
+		var win: Window = .{
+			.allocator = allocator,
+			.id = xcb.xcb_generate_id(connection),
+			.width = width, .height = height,
+			.gc = xcb.xcb_generate_id(connection),
+			.pixmap = .{
+				.id = xcb.xcb_generate_id(connection),
+				.width = width, .height = height,
+			},
+			.picture = xcb.xcb_generate_id(connection),
+			.colors = .empty,
+		};
+
+		var value_buffer: [16]u8 = undefined;
+		var values: ?*[16]u8 = &value_buffer;
+		const value_mask = xcb.XCB_CW_BACK_PIXEL
+			| xcb.XCB_CW_EVENT_MASK
+			| xcb.XCB_CW_BIT_GRAVITY;
+		_ = xcb.xcb_create_window_value_list_serialize(&values, value_mask, &.{
+			.background_pixel = config.background_color,
+			.event_mask = xcb.XCB_EVENT_MASK_EXPOSURE
+				| xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY
+				| xcb.XCB_EVENT_MASK_KEY_PRESS
+				| xcb.XCB_EVENT_MASK_KEY_RELEASE,
+			.bit_gravity = xcb.XCB_GRAVITY_NORTH_WEST,
+		});
+		try checkXcb(xcb.xcb_create_window_checked(connection, 24,
+				win.id, screen.*.root, 0, 0, width, height,
+				0, xcb.XCB_WINDOW_CLASS_INPUT_OUTPUT, screen.*.root_visual,
+				value_mask, values), error.WindowOpenFailed);
+		try checkXcb(xcb.xcb_create_gc_checked(connection, win.gc, win.id,
+				0, null), error.WindowOpenFailed);
+		try checkXcb(xcb.xcb_create_pixmap_checked(connection, 24,
+				win.pixmap.id, win.id, width, height), error.WindowOpenFailed);
+		try checkXcb(xcb.xcb_render_create_picture_checked(connection,
+				win.picture, win.pixmap.id, render_formats[2].id, 0, null),
+			error.WindowOpenFailed);
+		_ = xcb.xcb_render_composite(connection, xcb.XCB_RENDER_PICT_OP_SRC,
+			(try win.getColor(config.background_color)).picture,
+			0, win.picture, 0, 0, 0, 0, 0, 0, width, height);
+
+		return win;
+	}
+
+	pub fn close(win: *Window) void {
+		var it = win.colors.iterator();
+		while (it.next()) |c| {
+			_ = xcb.xcb_free_pixmap(connection, c.value_ptr.pixmap);
+			_ = xcb.xcb_render_free_picture(connection, c.value_ptr.picture);
+		}
+		win.colors.deinit(win.allocator);
+		_ = xcb.xcb_render_free_picture(connection, win.picture);
+		_ = xcb.xcb_free_pixmap(connection, win.pixmap.id);
+		_ = xcb.xcb_destroy_window(connection, win.id);
+	}
+
+	/// returns whether a redraw is required
+	fn resize(win: *Window, width: u16, height: u16) Error!bool {
+		win.width, win.height = .{ width, height };
+		if (width > win.pixmap.width or height > win.pixmap.height) {
+			// resizing the pixmap is required
+			const new_width, const new_height = .{
+				if (width > win.pixmap.width)
+					width + width / 2 else win.pixmap.width,
+				if (height > win.pixmap.height)
+					height + height / 2 else win.pixmap.height,
+			};
+			_ = xcb.xcb_render_free_picture(connection, win.picture);
+			_ = xcb.xcb_free_pixmap(connection, win.pixmap.id);
+			_ = xcb.xcb_create_pixmap_checked(connection, 24,
+				win.pixmap.id, win.id, new_width, new_height);
+			win.pixmap.width, win.pixmap.height = .{ new_width, new_height };
+			_ = xcb.xcb_render_create_picture(connection,
+				win.picture, win.pixmap.id, render_formats[2].id, 0, null);
+			_ = xcb.xcb_render_composite(connection, xcb.XCB_RENDER_PICT_OP_SRC,
+				(try win.getColor(config.background_color)).picture,
+				0, win.picture, 0, 0, 0, 0, 0, 0, new_width, new_height);
+			return true;
+		} else return false;
+	}
+
+	/// put the window to the screen
+	pub fn draw(win: *const Window) void {
+		_ = xcb.xcb_copy_area(connection, win.pixmap.id, win.id, win.gc,
+			0, @intCast(win.pixmap.height - win.height),
+			0, 0, win.width, win.height);
+		_ = xcb.xcb_map_window(connection, win.id);
+	}
+
+	fn renderBitmap(
+		win: *const Window, prepared: PreparedBitmap,
+		x: i16, y: i16, color: Color,
+	) void {
+		if (prepared.bitmap.w == 0 or prepared.bitmap.h == 0) return;
+		_ = xcb.xcb_render_composite(connection, xcb.XCB_RENDER_PICT_OP_OVER,
+			color.picture, prepared.picture, win.picture,
+			0, 0, 0, 0, x + prepared.bitmap.x, y + prepared.bitmap.y,
+			prepared.bitmap.w, prepared.bitmap.h);
+	}
+
+	/// render a char at cell (cx, cy) where cy = 0 at the BOTTOM
+	pub fn renderChar(
+		win: *Window, df: *DisplayFont,
+		c: char.Char, cx: u16, cy: u16, bg: u32, fg: u32,
+	) Error!void {
+		const y_pos = win.pixmap.height - df.face.height * (cy + 1);
+		_ = xcb.xcb_render_composite(connection, xcb.XCB_RENDER_PICT_OP_SRC,
+			(try win.getColor(bg)).picture, 0, win.picture, 0, 0, 0, 0,
+			@intCast(cx * df.face.width), @intCast(y_pos),
+			@intCast(df.face.width), @intCast(df.face.height));
+		if (std.meta.eql(c, char.null_char)) return;
+		win.renderBitmap(try df.getGlyphFromChar(c),
+			@intCast(cx * df.face.width),
+			@intCast(y_pos + df.face.baseline),
+			try win.getColor(fg));
+	}
+
+	fn getColor(win: *Window, hex: u32) Error!Color {
+		return win.colors.get(hex) orelse {
 			const c: Color = .{
 				.pixmap = xcb.xcb_generate_id(connection),
 				.picture = xcb.xcb_generate_id(connection),
 			};
-			_ = xcb.xcb_create_pixmap(connection, 24, c.pixmap, self.id, 1, 1);
+			_ = xcb.xcb_create_pixmap(connection, 24, c.pixmap, win.id, 1, 1);
 			_ = xcb.xcb_render_create_picture(connection,
 				c.picture, c.pixmap, render_formats[2].id,
 				xcb.XCB_RENDER_CP_REPEAT, &xcb.XCB_RENDER_REPEAT_NORMAL);
@@ -194,155 +322,140 @@ pub const Window = struct {
 				xcb.XCB_RENDER_PICT_OP_SRC, c.picture,
 				xcbrColorFromHex(hex),
 				1, &.{ .x = 0, .y = 0, .width = 1, .height = 1 });
-			try self.colors.put(self.allocator, hex, c);
+			try win.colors.put(win.allocator, hex, c);
 			return c;
 		};
 	}
 
-	pub fn open(
-		allocator: std.mem.Allocator,
-		width: u16, height: u16,
-	) Error!Window {
-		const w: Window = .{
-			.allocator = allocator,
-			.id = xcb.xcb_generate_id(connection),
-			.picture = xcb.xcb_generate_id(connection),
-			.colors = try allocator.create(ColorMap),
-		};
-		w.colors.* = .empty;
-
-		var value_buffer: [8]u8 = undefined;
-		var values: ?*[8]u8 = &value_buffer;
-		const value_mask = xcb.XCB_CW_BACK_PIXEL
-			| xcb.XCB_CW_EVENT_MASK;
-		_ = xcb.xcb_create_window_value_list_serialize(&values, value_mask, &.{
-			.background_pixel = config.background_color,
-			.event_mask = xcb.XCB_EVENT_MASK_EXPOSURE
-				| xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY
-				| xcb.XCB_EVENT_MASK_KEY_PRESS
-				| xcb.XCB_EVENT_MASK_KEY_RELEASE,
-		});
-		try checkXcb(xcb.xcb_create_window_checked(connection, 24,
-				w.id, screen.*.root, 0, 0, width, height,
-				0, xcb.XCB_WINDOW_CLASS_INPUT_OUTPUT, screen.*.root_visual,
-				value_mask, values), error.WindowOpenFailed);
-		try checkXcb(xcb.xcb_render_create_picture(connection,
-				w.picture, w.id, render_formats[2].id, 0, null),
-			error.WindowOpenFailed);
-
-		return w;
+	/// set the title of the window. title does not need to be null-terminated
+	pub fn setTitle(win: *const Window, title: []const u8) void {
+		_ = xcb.xcb_change_property(connection, xcb.XCB_PROP_MODE_REPLACE,
+			win.id, xcb.XCB_ATOM_WM_NAME, xcb.XCB_ATOM_STRING,
+			8, @intCast(title.len), title.ptr);
+		_ = xcb.xcb_change_property(connection, xcb.XCB_PROP_MODE_REPLACE,
+			win.id, xcb.XCB_ATOM_WM_ICON_NAME, xcb.XCB_ATOM_STRING,
+			8, @intCast(title.len), title.ptr);
 	}
-
-	pub fn close(self: Window) void {
-		var it = self.colors.iterator();
-		while (it.next()) |c| {
-			_ = xcb.xcb_free_pixmap(connection, c.value_ptr.pixmap);
-			_ = xcb.xcb_render_free_picture(connection, c.value_ptr.picture);
-		}
-		self.colors.deinit(self.allocator);
-		_ = xcb.xcb_render_free_picture(connection, self.picture);
-		_ = xcb.xcb_destroy_window(connection, self.id);
-	}
-
-	pub fn map(self: Window) void {
-		_ = xcb.xcb_map_window(connection, self.id);
-	}
-
-	fn renderBitmap(
-		self: Window, bitmap: PreparedBitmap,
-		x: i16, y: i16, color: Color,
-	) void {
-		if (bitmap.bitmap.w == 0 or bitmap.bitmap.h == 0) return;
-		_ = xcb.xcb_render_composite(connection, xcb.XCB_RENDER_PICT_OP_OVER,
-			color.picture, bitmap.picture, self.picture,
-			0, 0, 0, 0, x + bitmap.bitmap.x, y + bitmap.bitmap.y,
-			bitmap.bitmap.w, bitmap.bitmap.h);
-	}
-
-	pub fn renderChar(
-		self: Window, df: DisplayFont,
-		c: char.Char, cx: u16, cy: u16, bg: u32, fg: u32,
+	/// sets the class of the window; should be two strings, null-separated
+	pub fn setClass(
+		win: *const Window, class_i: []const u8, class_g: []const u8,
 	) Error!void {
-		_ = xcb.xcb_render_composite(connection, xcb.XCB_RENDER_PICT_OP_SRC,
-			(try self.getColor(bg)).picture, 0, self.picture, 0, 0, 0, 0,
-			@intCast(cx * df.face.width), @intCast(cy * df.face.height),
-			@intCast(df.face.width), @intCast(df.face.height));
-		if (std.meta.eql(c, char.null_char)) return;
-		self.renderBitmap(
-			try df.getGlyphFromChar(c),
-			@intCast(cx * df.face.width),
-			@intCast(cy * df.face.height + df.face.baseline),
-			try self.getColor(fg),
-		);
+		const class = try win.allocator.alloc(u8,
+			class_i.len + 1 + class_g.len);
+		defer win.allocator.free(class);
+		@memcpy(class[0..class_i.len], class_i);
+		class[class_i.len] = '\x00';
+		@memcpy(class[class_i.len + 1 .. class.len], class_g);
+		_ = xcb.xcb_change_property(connection, xcb.XCB_PROP_MODE_REPLACE,
+			win.id, xcb.XCB_ATOM_WM_CLASS, xcb.XCB_ATOM_STRING,
+			8, @intCast(class.len), class.ptr);
+	}
+	/// set the resize grid of the window
+	pub fn setResizeGrid(win: *const Window, width: u16, height: u16) void {
+		_ = xcb.xcb_change_property(connection, xcb.XCB_PROP_MODE_REPLACE,
+			win.id, xcb.XCB_ATOM_WM_NORMAL_HINTS, xcb.XCB_ATOM_WM_SIZE_HINTS,
+			32, 18, &[18]i32{
+				0b0101010000,		// flags
+				0, 0, 0, 0,			// pad
+				width, height,		// min w & h
+				0, 0,				// max w & h
+				width, height,		// w & h inc
+				0, 0, 0, 0,			// min & max aspect
+				0, 0,				// base w & h
+				0,					// gravity
+			});
 	}
 };
 
 pub const Event = struct {
 	pub const Type = union(enum) {
+		/// just ignore these events
 		unknown,
-		err,
+		/// the window was destroyed
 		destroy,
-		expose,
-		resize: struct { w: u16, h: u16 },
+		/// the window was resized
+		resize: struct { width: u16, height: u16, redraw_required: bool },
+		/// a key was pressed/released
 		key: struct { down: bool, code: u16 },
 	};
 	type: Type,
 	w_id: ?WindowID,
 };
 
+pub const unknown_event: Event = .{ .type = .unknown, .w_id = null };
+
 inline fn castEvent(T: type, e: *xcb.xcb_generic_event_t) *T {
 	return @as(*T, @ptrCast(e));
 }
 
-fn eventFromXcb(event: *xcb.xcb_generic_event_t) Event {
-	switch (event.response_type) {
+fn handleXcbEvent(
+	xcb_event: *xcb.xcb_generic_event_t,
+	windows: []Window,
+) Error!Event { switch (xcb_event.response_type) {
 		0 => {
-			const err = castEvent(xcb.xcb_generic_error_t, event);
+			const event =
+				castEvent(xcb.xcb_generic_error_t, xcb_event);
 			logger.err("xcb error {} {}:{}", .{
-				err.*.error_code, err.*.major_code, err.*.minor_code,
+				event.*.error_code, event.*.major_code, event.*.minor_code,
 			});
-			return .{ .type = .err, .w_id = null };
+			return unknown_event;
 		},
-		xcb.XCB_DESTROY_NOTIFY => return .{
-			.type = .destroy,
-			.w_id = castEvent(xcb.xcb_destroy_notify_event_t, event).window,
+		xcb.XCB_DESTROY_NOTIFY => {
+			const event =
+				castEvent(xcb.xcb_destroy_notify_event_t, xcb_event);
+			return .{ .type = .destroy, .w_id = event.window };
 		},
-		xcb.XCB_EXPOSE => return .{
-			.type = .expose,
-			.w_id = castEvent(xcb.xcb_expose_event_t, event).window,
+		xcb.XCB_EXPOSE => {
+			const event =
+				castEvent(xcb.xcb_expose_event_t, xcb_event);
+			find_window: {
+				for (windows) |win| if (win.id == event.window) {
+					win.draw();
+					break :find_window;
+				};
+				return error.WindowNotFound;
+			}
+			return unknown_event;
 		},
-		xcb.XCB_CONFIGURE_NOTIFY => return .{
-			.type = .{ .resize = .{
-				.w = castEvent(xcb.xcb_configure_notify_event_t, event).width,
-				.h = castEvent(xcb.xcb_configure_notify_event_t, event).height,
-			} },
-			.w_id = castEvent(xcb.xcb_configure_notify_event_t, event).window,
+		xcb.XCB_CONFIGURE_NOTIFY => {
+			const event =
+				castEvent(xcb.xcb_configure_notify_event_t, xcb_event);
+			const redraw_required = find_window: {
+				for (0..windows.len) |i| if (windows[i].id == event.window) {
+					break :find_window
+						try windows[i].resize(event.width, event.height);
+				};
+				return error.WindowNotFound;
+			};
+			return .{
+				.type = .{ .resize = .{
+					.width = event.width,
+					.height = event.height,
+					.redraw_required = redraw_required,
+				} },
+				.w_id = event.window,
+			};
 		},
-		xcb.XCB_KEY_PRESS => return .{
-			.type = .{ .key = .{
-				.down = true,
-				.code = castEvent(xcb.xcb_key_press_event_t, event).detail,
-			} },
-			.w_id = castEvent(xcb.xcb_key_press_event_t, event).event,
+		xcb.XCB_KEY_PRESS, xcb.XCB_KEY_RELEASE => |xcb_type| {
+			const event =
+				castEvent(xcb.xcb_key_press_event_t, xcb_event);
+			const down = xcb_type == xcb.XCB_KEY_PRESS;
+			return .{
+				.type = .{ .key = .{ .down = down, .code = event.detail } },
+				.w_id = event.event,
+			};
 		},
-		xcb.XCB_KEY_RELEASE => return .{
-			.type = .{ .key = .{
-				.down = false,
-				.code = castEvent(xcb.xcb_key_release_event_t, event).detail,
-			} },
-			.w_id = castEvent(xcb.xcb_key_release_event_t, event).event,
-		},
-		else => return .{ .type = .unknown, .w_id = null },
+		else => return unknown_event,
 	}
 }
 
-pub fn pollEvent() ?Event {
+pub fn pollEvent(w: []Window) Error!?Event {
 	const event = xcb.xcb_wait_for_event(connection) orelse return null;
-	return eventFromXcb(event);
+	return try handleXcbEvent(event, w);
 }
 
-pub fn waitEvent() Error!Event {
+pub fn waitEvent(w: []Window) Error!Event {
 	const event = xcb.xcb_wait_for_event(connection)
 		orelse return error.ConnectionClosed;
-	return eventFromXcb(event);
+	return handleXcbEvent(event, w);
 }

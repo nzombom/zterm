@@ -6,19 +6,23 @@ const config = @import("config.zig");
 const char = @import("char.zig");
 const display = @import("x.zig");
 
-const Error = error { OutOfMemory, NoLines };
+const logger = std.log.scoped(.screen);
+
+const Error = error { OutOfMemory };
 
 allocator: std.mem.Allocator,
+/// lines are stored bottom-to-top because that is how it should work imo
 lines: std.Deque(Line),
-w: u16,
-cursor_x: u16, cursor_y: u16,
+width: u16,
+cursor_x: u16,
+/// cursor y is from the bottom (0 is the bottom line)
+cursor_y: u16,
 
 pub const Line = struct {
 	/// buffer of chars (width should be stored just once in the parent object
 	/// instead of with every line)
 	c: [*]char.Char,
-	/// whether this line requires redrawing (a char has changed, it has moved,
-	/// etc.)
+	/// whether this line requires redrawing (a char has changed, it has moved)
 	redraw: bool,
 };
 
@@ -30,152 +34,151 @@ fn dequePtr(T: type, deque: std.Deque(T), index: usize) *T {
 	}];
 }
 
-pub fn init(allocator: std.mem.Allocator, w: u16, h: u16) Error!Screen {
-	var s: Screen = .{
+pub fn init(
+	allocator: std.mem.Allocator,
+	width: u16, height: u16,
+) Error!Screen {
+	var scr: Screen = .{
 		.allocator = allocator,
-		.lines = try .initCapacity(allocator, h),
-		.w = w, .cursor_x = 0, .cursor_y = 0,
+		.lines = try .initCapacity(allocator, height),
+		.width = width, .cursor_x = 0, .cursor_y = 0,
 	};
-	s.addLinesFront(h) catch unreachable;
-	s.cursor_y -= 1;
-	return s;
+	try scr.addLinesTop(height);
+	return scr;
 }
 
-pub fn deinit(self: *Screen) void {
-	self.removeLinesFront(@intCast(self.lines.len)) catch unreachable;
+pub fn deinit(scr: *Screen) void {
+	scr.removeLinesTop(@intCast(scr.lines.len));
 }
 
-/// add n empty lines to the bottom of the screen
-pub fn addLinesBack(self: *Screen, n: u16) Error!void {
+/// add n empty lines to the top of the screen
+pub fn addLinesTop(scr: *Screen, n: u16) Error!void {
 	for (0..n) |_| {
-		try self.lines.pushBack(self.allocator, .{
-			.c = (try self.allocator.alloc(char.Char, self.w)).ptr,
+		try scr.lines.pushBack(scr.allocator, .{
+			.c = (try scr.allocator.alloc(char.Char, scr.width)).ptr,
 			.redraw = true,
 		});
-		@memset(self.lines.at(self.lines.len - 1).c[0..self.w],
+		@memset(scr.lines.at(scr.lines.len - 1).c[0..scr.width],
 			char.null_char);
 	}
 }
-/// add n empty lines to the top of the screen and move the cursor down
-pub fn addLinesFront(self: *Screen, n: u16) Error!void {
-	self.prepareRedraw();
+/// add n empty lines to the bottom of the screen & move the cursor up
+pub fn addLinesBottom(scr: *Screen, n: u16) Error!void {
 	for (0..n) |_| {
-		try self.lines.pushFront(self.allocator, .{
-			.c = (try self.allocator.alloc(char.Char, self.w)).ptr,
+		try scr.lines.pushFront(scr.allocator, .{
+			.c = (try scr.allocator.alloc(char.Char, scr.width)).ptr,
 			.redraw = true,
 		});
-		@memset(self.lines.at(0).c[0..self.w], char.null_char);
+		@memset(scr.lines.at(0).c[0..scr.width], char.null_char);
 	}
-	self.cursor_y += n;
+	scr.cursor_y += n;
 }
-/// remove n lines from the bottom of the screen
-pub fn removeLinesBack(self: *Screen, n: u16) Error!void {
-	for (0..n) |_| self.allocator.free((self.lines.popBack()
-			orelse return error.NoLines).c[0..self.w]);
+/// remove n lines from the top of the screen
+pub fn removeLinesTop(scr: *Screen, n: u16) void {
+	for (0..n) |_| scr.allocator.free((scr.lines.popBack()
+			orelse unreachable).c[0..scr.width]);
 }
-/// remove n lines from the top of the screen and move the cursor up
-pub fn removeLinesFront(self: *Screen, n: u16) Error!void {
-	self.prepareRedraw();
-	for (0..n) |_| self.allocator.free((self.lines.popFront()
-			orelse return error.NoLines).c[0..self.w]);
-	self.cursor_y -= n;
+/// remove n lines from the bottom of the screen & move the cursor down
+pub fn removeLinesBottom(scr: *Screen, n: u16) void {
+	for (0..n) |_| scr.allocator.free((scr.lines.popFront()
+			orelse unreachable).c[0..scr.width]);
+	scr.cursor_y -= n;
 }
 
 /// resize the screen to w by h chars
-pub fn resize(self: *Screen, w: u16, h: u16) Error!void {
-	const prev_h = self.lines.len;
-	if (h > prev_h) {
-		self.addLinesFront(h - prev_h);
-	} else if (h < prev_h) {
-		self.removeLinesFront(prev_h - h);
+pub fn resize(scr: *Screen, width: u16, height: u16) Error!void {
+	const prev_h = scr.lines.len;
+	if (height > prev_h) {
+		try scr.addLinesTop(@intCast(height - prev_h));
+	} else if (height < prev_h) {
+		scr.removeLinesTop(@intCast(prev_h - height));
 	}
 
-	if (w != self.w) {
-		for (0..self.lines.len) |y| {
-			dequePtr(Line, self.lines, y).*.c = (try
-			self.allocator.realloc(self.lines.at(y).c[0..self.w], w)
-		).ptr;
-			if (w > self.w) @memset(self.lines.at(y)[self.w..w],
-			char.null_char);
+	if (width != scr.width) {
+		for (0..scr.lines.len) |y| {
+			dequePtr(Line, scr.lines, y).*.c = (try scr.allocator.realloc(
+					scr.lines.at(y).c[0..scr.width], width)).ptr;
+			if (width > scr.width) {
+				@memset(scr.lines.at(y).c[scr.width..width], char.null_char);
+				dequePtr(Line, scr.lines, y).*.redraw = true;
+			}
 		}
-		self.w = w;
+		scr.width = width;
 	}
 }
 
 /// move the cursor down, scrolling if necessary
-pub fn cursorDown(self: *Screen) Error!void {
-	self.cursor_y += 1;
-	if (self.cursor_y >= self.lines.len) {
-		try self.addLinesBack(1);
-		try self.removeLinesFront(1);
-		self.cursor_y = @intCast(self.lines.len - 1);
+pub fn cursorDown(scr: *Screen) Error!void {
+	const scroll = scr.cursor_y == 0;
+	if (!scroll) scr.cursor_y -= 1 else {
+		try scr.addLinesBottom(1);
+		scr.removeLinesTop(1);
+		scr.cursor_y = 0;
 	}
 }
 /// move the cursor up, scrolling if necessary
-pub fn cursorUp(self: *Screen) Error!void {
-	const scroll = self.cursor_y == 0;
-	if (!scroll) self.cursor_y -= 1 else {
-		try self.addLinesFront(1);
-		try self.removeLinesBack(1);
-		self.cursor_y = 0;
+pub fn cursorUp(scr: *Screen) Error!void {
+	scr.cursor_y += 1;
+	if (scr.cursor_y >= scr.lines.len) {
+		try scr.addLinesTop(1);
+		scr.removeLinesBottom(1);
+		scr.cursor_y = scr.lines.len - 1;
 	}
 }
 /// move the cursor right, wrapping lines if necessary
-pub fn cursorRight(self: *Screen) Error!void {
-	self.cursor_x += 1;
-	if (self.cursor_x >= self.w) {
-		self.cursor_x = 0;
-		try self.cursorDown();
+pub fn cursorRight(scr: *Screen) Error!void {
+	scr.cursor_x += 1;
+	if (scr.cursor_x >= scr.width) {
+		scr.cursor_x = 0;
+		try scr.cursorDown();
 	}
 }
 /// move the cursor left, wrapping lines if necessary
-pub fn cursorLeft(self: *Screen) Error!void {
-	const wrap = self.cursor_x == 0;
-	if (!wrap) self.cursor_x -= 1 else {
-		self.cursor_x = self.w - 1;
-		try self.cursorUp();
+pub fn cursorLeft(scr: *Screen) Error!void {
+	const wrap = scr.cursor_x == 0;
+	if (!wrap) scr.cursor_x -= 1 else {
+		scr.cursor_x = scr.width - 1;
+		try scr.cursorUp();
 	}
 }
 
 /// put a char under the cursor (TODO: this should handle esc seqs as well)
-pub fn putChar(self: *Screen, c: char.Char) Error!void {
+pub fn putChar(scr: *Screen, c: char.Char) Error!void {
 	if (char.toCode(c) == 0x0a) {
-		try self.cursorDown();
-		self.cursor_x = 0;
+		try scr.cursorDown();
+		scr.cursor_x = 0;
 		return;
 	}
-	self.lines.at(self.cursor_y).c[self.cursor_x] = c;
-	dequePtr(Line, self.lines, self.cursor_y).redraw = true;
-	try self.cursorRight();
+	scr.lines.at(scr.cursor_y).c[scr.cursor_x] = c;
+	dequePtr(Line, scr.lines, scr.cursor_y).redraw = true;
+	try scr.cursorRight();
 }
 
+var draws: u32 = 0;
 pub fn draw(
-	self: *const Screen,
-	window: display.Window,
-	font: display.DisplayFont,
+	scr: *const Screen,
+	win: *display.Window, df: *display.DisplayFont,
 ) display.Error!void {
-	for (0..self.lines.len) |y| {
-		if (!self.lines.at(y).redraw) continue;
-		for (0..self.w, self.lines.at(y).c) |x, c| {
-			try window.renderChar(font, c,
-				@as(u16, @intCast(x)), @as(u16, @intCast(y)),
+	for (0..scr.lines.len) |y| {
+		if (!scr.lines.at(y).redraw) continue;
+		for (0..scr.width, scr.lines.at(y).c) |x, c| {
+			draws += 1;
+			try win.renderChar(df, c, @intCast(x), @intCast(y),
 				config.background_color, config.foreground_color);
 		}
-		dequePtr(Line, self.lines, y).redraw = false;
+		dequePtr(Line, scr.lines, y).redraw = false;
 	}
 
 	// render the cursor (this will double-render that char but that was better
 	// than checking the value for every run of the loop)
-	try window.renderChar(font,
-		self.lines.at(self.cursor_y).c[self.cursor_x],
-		@as(u16, @intCast(self.cursor_x)),
-		@as(u16, @intCast(self.cursor_y)),
+	try win.renderChar(df, scr.lines.at(scr.cursor_y).c[scr.cursor_x],
+		scr.cursor_x, scr.cursor_y,
 		config.cursor_background_color orelse config.background_color,
 		config.cursor_foreground_color orelse config.foreground_color);
 }
 
 /// set every line to requiring a redraw (should use this if window pixel
 /// data is lost)
-pub fn prepareRedraw(self: *Screen) void {
-	for (0..self.lines.len) |y| dequePtr(Line, self.lines, y).redraw = true;
+pub fn prepareRedraw(scr: *Screen) void {
+	for (0..scr.lines.len) |y| dequePtr(Line, scr.lines, y).redraw = true;
 }
