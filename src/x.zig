@@ -327,10 +327,18 @@ pub const Window = struct {
 		};
 	}
 
+	fn getAtom(str: []const u8) xcb.xcb_atom_t {
+		return xcb.xcb_intern_atom_reply(connection,
+			xcb.xcb_intern_atom_unchecked(connection, 0,
+				@intCast(str.len), str.ptr), null).*.atom;
+	}
 	/// set the title of the window. title does not need to be null-terminated
 	pub fn setTitle(win: *const Window, title: []const u8) void {
 		_ = xcb.xcb_change_property(connection, xcb.XCB_PROP_MODE_REPLACE,
 			win.id, xcb.XCB_ATOM_WM_NAME, xcb.XCB_ATOM_STRING,
+			8, @intCast(title.len), title.ptr);
+		_ = xcb.xcb_change_property(connection, xcb.XCB_PROP_MODE_REPLACE,
+			win.id, getAtom("_NET_WM_NAME"), getAtom("UTF8_STRING"),
 			8, @intCast(title.len), title.ptr);
 		_ = xcb.xcb_change_property(connection, xcb.XCB_PROP_MODE_REPLACE,
 			win.id, xcb.XCB_ATOM_WM_ICON_NAME, xcb.XCB_ATOM_STRING,

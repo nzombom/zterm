@@ -12,6 +12,7 @@ pub const cursor_foreground_color: ?u32 = null;
 
 pub const default_width: u16 = 80;
 pub const default_height: u16 = 20;
+pub const max_scrollback: u16 = 256;
 
 pub const min_latency: u64 = 5;
 pub const max_latency: u64 = 25;

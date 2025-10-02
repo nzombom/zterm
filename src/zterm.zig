@@ -53,7 +53,7 @@ pub fn main() anyerror!void {
 		config.default_height);
 	defer scr.deinit();
 
-	var pty = try Pty.init("bash", &.{ "bash", "-c", "yes | tr '\\n' a" });
+	var pty = try Pty.init("sh", &.{ "sh" });
 	defer pty.deinit();
 
 	var updated: i64 = undefined;
@@ -74,10 +74,12 @@ pub fn main() anyerror!void {
 			},
 			else => {},
 		};
+
 		if (try pty.readable()) {
 			try scr.putChar(try pty.readChar());
 			startRedraw(&updated, &timeout);
 		}
+
 		if (timeout != null) {
 			if (std.time.milliTimestamp() - updated > timeout.?) {
 				try scr.draw(&win, &df);
