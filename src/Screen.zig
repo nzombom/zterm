@@ -4,7 +4,6 @@ const Screen = @This();
 const std = @import("std");
 const config = @import("config.zig");
 const char = @import("char.zig");
-const display = @import("x.zig");
 
 const logger = std.log.scoped(.screen);
 
@@ -140,8 +139,10 @@ pub fn prepareRedraw(scr: *Screen) void {
 	for (0..scr.lines.len) |y| scr.lineAt(@intCast(y)).redraw = true;
 }
 
+/// draws the characters to the display; takes in the implementation of display
 pub fn draw(
 	scr: *const Screen,
+	display: type,
 	win: *display.Window, df: *display.DisplayFont,
 ) display.Error!void {
 	for (0..scr.view_height) |y_usize| {

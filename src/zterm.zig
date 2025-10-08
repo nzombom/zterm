@@ -1,7 +1,7 @@
 const std = @import("std");
 const config = @import("config.zig");
 const char = @import("char.zig");
-const display = @import("x.zig");
+const display = @import("display/x_xrender.zig");
 const font = @import("font.zig");
 const Pty = @import("Pty.zig");
 const Screen = @import("Screen.zig");
@@ -32,8 +32,8 @@ fn startRedraw(updated: *i64, timeout: *?u64) void {
 pub fn main() anyerror!void {
 	try font.init();
 	defer font.deinit();
-	try display.init();
-	defer display.deinit();
+	try display.init(allocator);
+	defer display.deinit(allocator);
 
 	var df = try display.DisplayFont.init(allocator, config.font, .gray);
 	defer df.deinit();
@@ -61,13 +61,13 @@ pub fn main() anyerror!void {
 
 	while (true) {
 		const has_event = try display.pollEvent((&win)[0..1]);
-		if (has_event) |event| switch (event.type) {
+		if (has_event) |event| switch (event) {
 			.destroy => break,
 			.resize => |resize| {
 				try scr.resize(resize.width / df.face.width,
 					resize.height / df.face.height);
 				if (resize.redraw_required) scr.prepareRedraw();
-				try scr.draw(&win, &df);
+				try scr.draw(display, &win, &df);
 				win.draw();
 				display.flush();
 				timeout = null;
@@ -82,7 +82,7 @@ pub fn main() anyerror!void {
 
 		if (timeout != null) {
 			if (std.time.milliTimestamp() - updated > timeout.?) {
-				try scr.draw(&win, &df);
+				try scr.draw(display, &win, &df);
 				win.draw();
 				display.flush();
 				timeout = null;
