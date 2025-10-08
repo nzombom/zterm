@@ -72,6 +72,9 @@ pub fn main() anyerror!void {
 				display.flush();
 				timeout = null;
 			},
+			.key => |key| {
+				if (key.down) logger.info("{}", .{ key.sym });
+			},
 			else => {},
 		};
 

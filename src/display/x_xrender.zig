@@ -86,21 +86,6 @@ pub fn deinit(allocator: std.mem.Allocator) void {
 }
 pub fn flush() void { _ = xcb.xcb_flush(connection); }
 
-pub const Event = union(enum) {
-	/// just ignore these events
-	unknown,
-	/// the window was destroyed
-	destroy: struct { win: *Window },
-	/// the window was resized
-	resize: struct {
-		win: *Window,
-		width: u16, height: u16,
-		redraw_required: bool
-	},
-	/// a key was pressed/released
-	key: struct { win: *Window, down: bool, code: u16 },
-};
-
 inline fn castEvent(T: type, e: *xcb.xcb_generic_event_t) *T {
 	return @as(*T, @ptrCast(e));
 }
@@ -122,12 +107,10 @@ const KeySymMap = struct {
 	width: u8,
 	syms: []u32,
 
-	fn getSym(sym_map: KeySymMap, types: []KeyType, state: KeyState) ?u32 {
-		const type_index = sym_map.type_indices[state.group];
-		if (type_index == 0) return null;
+	fn getSym(sym_map: KeySymMap, types: []KeyType, state: KeyState) u32 {
 		return sym_map.syms[
 			state.group * sym_map.width
-			+ types[type_index].getLevel(state.mods)
+			+ types[sym_map.type_indices[state.group]].getLevel(state.mods)
 		];
 	}
 };
@@ -212,11 +195,26 @@ fn getKeyboard(
 	};
 }
 
-fn getKeySym(event: *const xcb.xcb_key_press_event_t) ?u32 {
+fn getKeySym(event: *const xcb.xcb_key_press_event_t) u32 {
 	const code = event.detail;
 	const state: KeyState = @bitCast(event.state);
 	return keyboard_sym_maps[code].getSym(keyboard_types, state);
 }
+
+pub const Event = union(enum) {
+	/// just ignore these events
+	unknown,
+	/// the window was destroyed
+	destroy: struct { win: *Window },
+	/// the window was resized
+	resize: struct {
+		win: *Window,
+		width: u16, height: u16,
+		redraw_required: bool
+	},
+	/// a key was pressed/released
+	key: struct { win: *Window, down: bool, code: u16, sym: u32 },
+};
 
 fn handleXcbEvent(
 	xcb_event: *xcb.xcb_generic_event_t,
@@ -272,7 +270,6 @@ fn handleXcbEvent(
 			const event =
 				castEvent(xcb.xcb_key_press_event_t, xcb_event);
 			const down = xcb_type == xcb.XCB_KEY_PRESS;
-			logger.info("{any}", .{ getKeySym(event) });
 			return .{ .key = .{
 				.win = find_window: {
 					for (0..windows.len) |i| if (windows[i].id == event.event)
@@ -281,6 +278,7 @@ fn handleXcbEvent(
 				},
 				.down = down,
 				.code = event.detail,
+				.sym = getKeySym(event),
 			} };
 		},
 		else => return .unknown,
