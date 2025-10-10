@@ -32,8 +32,8 @@ fn startRedraw(updated: *i64, timeout: *?u64) void {
 pub fn main() anyerror!void {
 	try font.init();
 	defer font.deinit();
-	try display.init(allocator);
-	defer display.deinit(allocator);
+	try display.init();
+	defer display.deinit();
 
 	var df = try display.DisplayFont.init(allocator, config.font, .gray);
 	defer df.deinit();
@@ -73,7 +73,11 @@ pub fn main() anyerror!void {
 				timeout = null;
 			},
 			.key => |key| {
-				if (key.down) logger.info("{}", .{ key.sym });
+				if (key.down) if (key.info.key == .char) {
+					logger.info("{c}", .{ key.info.key.char[0] });
+					try scr.putChar(key.info.key.char);
+					startRedraw(&updated, &timeout);
+				};
 			},
 			else => {},
 		};

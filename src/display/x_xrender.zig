@@ -9,6 +9,8 @@ const xcb = @cImport({
 	@cInclude("xcb/render.h");
 	@cInclude("xcb/xkb.h");
 	@cInclude("xcb/xcb_renderutil.h");
+	@cInclude("xkbcommon/xkbcommon.h");
+	@cInclude("xkbcommon/xkbcommon-x11.h");
 });
 
 const logger = std.log.scoped(.display);
@@ -16,8 +18,9 @@ const logger = std.log.scoped(.display);
 var connection: *xcb.xcb_connection_t = undefined;
 var screen: *xcb.xcb_screen_t = undefined;
 var render_formats: [3]*xcb.xcb_render_pictforminfo_t = undefined;
-var keyboard_types: []KeyType = undefined;
-var keyboard_sym_maps: []KeySymMap = undefined;
+var xkb_context: *xcb.xkb_context = undefined;
+var xkb_keymap: *xcb.xkb_keymap = undefined;
+var xkb_state: *xcb.xkb_state = undefined;
 
 pub const Error = error {
 	OutOfMemory,
@@ -42,7 +45,7 @@ fn checkXcb(
 	}
 }
 
-pub fn init(allocator: std.mem.Allocator) Error!void {
+pub fn init() Error!void {
 	var screen_n: i32 = undefined;
 	connection = xcb.xcb_connect(null, &screen_n)
 		orelse return Error.InitFailed;
@@ -76,129 +79,28 @@ pub fn init(allocator: std.mem.Allocator) Error!void {
 			null).*.supported != 1)
 		return error.InitFailed;
 
-	logger.debug("established xcb connection on screen {}", .{ screen_n });
+	xkb_context = xcb.xkb_context_new(xcb.XKB_CONTEXT_NO_FLAGS)
+		orelse return error.InitFailed;
+	const xkb_device = xcb.xkb_x11_get_core_keyboard_device_id(connection);
+	if (xkb_device < 0) return error.InitFailed;
+	xkb_keymap = xcb.xkb_x11_keymap_new_from_device(xkb_context, connection,
+		xkb_device, xcb.XKB_KEYMAP_COMPILE_NO_FLAGS)
+		orelse return error.InitFailed;
+	xkb_state = xcb.xkb_state_new(xkb_keymap)
+		orelse return error.InitFailed;
 
-	keyboard_types, keyboard_sym_maps = try getKeyboard(allocator);
+	logger.debug("established xcb connection on screen {}", .{ screen_n });
 }
-pub fn deinit(allocator: std.mem.Allocator) void {
-	allocator.free(keyboard_types);
+pub fn deinit() void {
+	xcb.xkb_state_unref(xkb_state);
+	xcb.xkb_keymap_unref(xkb_keymap);
+	xcb.xkb_context_unref(xkb_context);
 	xcb.xcb_disconnect(connection);
 }
 pub fn flush() void { _ = xcb.xcb_flush(connection); }
 
-inline fn castEvent(T: type, e: *xcb.xcb_generic_event_t) *T {
+inline fn eventAs(T: type, e: *xcb.xcb_generic_event_t) *T {
 	return @as(*T, @ptrCast(e));
-}
-
-const KeyState = packed struct {
-	mods: u8, buttons: u5, group: u2, reserved: u1,
-};
-const KeyType = struct {
-	mod_mask: u8,
-	levels: [256]u8,
-	preserve: [256]bool,
-
-	fn getLevel(key_type: *const KeyType, mods: u8) u8 {
-		return key_type.levels[mods & key_type.mod_mask];
-	}
-};
-const KeySymMap = struct {
-	type_indices: [4]u8,
-	width: u8,
-	syms: []u32,
-
-	fn getSym(sym_map: KeySymMap, types: []KeyType, state: KeyState) u32 {
-		return sym_map.syms[
-			state.group * sym_map.width
-			+ types[sym_map.type_indices[state.group]].getLevel(state.mods)
-		];
-	}
-};
-
-fn getKeyboard(
-	allocator: std.mem.Allocator
-) Error!std.meta.Tuple(&.{ []KeyType, []KeySymMap }) {
-	var err: ?*xcb.xcb_generic_error_t = null;
-	const get_map_req = xcb.xcb_xkb_get_map(connection, 0x100,
-		xcb.XCB_XKB_MAP_PART_KEY_SYMS | xcb.XCB_XKB_MAP_PART_KEY_TYPES, 0,
-		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
-	const map_info: *xcb.xcb_xkb_get_map_reply_t =
-		xcb.xcb_xkb_get_map_reply(connection, get_map_req, &err).?;
-	const map_data = xcb.xcb_xkb_get_map_map(map_info).?;
-	if (err) |err_exists| logXcbError(err_exists);
-
-	const key_types = try allocator.alloc(KeyType, map_info.nTypes);
-	const XkbType = extern struct {
-		mask: u8, mods: u8, vmods: u16,
-		n_levels: u8, n_entries: u8,
-		has_preserve: u8,
-		unused: u8, data: void,
-
-		const Entry = extern struct {
-			active: u8, mask: u8,
-			level: u8,
-			mods: u8, vmods: u16,
-			unused: u16,
-		};
-		const Preserve = extern struct { mask: u8, mods: u8, vmods: u16 };
-
-		fn getSize(t: *const @This()) usize {
-			return 8 + @as(usize, if (t.has_preserve > 0) 12 else 8)
-				* t.n_entries;
-		}
-		fn getEntries(t: *@This()) []Entry {
-			return @as([*]Entry, @ptrCast(&t.data))[0..t.n_entries];
-		}
-		fn getPreserve(t: *@This()) ?[]Preserve {
-			return (@as([*]Preserve, @ptrCast(&t.data))
-				+ 8 * t.n_entries)[0..t.n_entries];
-		}
-	};
-	var type_ptr: *align(4) XkbType = @alignCast(@ptrCast(map_data));
-	for (0..map_info.nTypes) |i| {
-		key_types[i] = .{
-			.mod_mask = type_ptr.mask,
-			.levels = .{ 0 } ** 256, .preserve = .{ false } ** 256,
-		};
-		const entries = type_ptr.getEntries();
-		for (entries) |entry| if (entry.active > 0) {
-			key_types[i].levels[entry.mask] = entry.level;
-		};
-		if (type_ptr.getPreserve()) |preserves| for (preserves) |preserve| {
-			key_types[i].preserve[preserve.mask] = true;
-		};
-		type_ptr = @ptrFromInt(@intFromPtr(type_ptr) + type_ptr.getSize());
-	}
-
-	const key_sym_maps = try allocator.alloc(KeySymMap, map_info.nKeySyms);
-	const XkbSymMap = extern struct {
-		type_index: [4]u8,
-		groupInfo: u8, width: u8, n_syms: u16, data: void,
-		fn getSize(sm: *const @This()) usize { return 8 + 4 * sm.n_syms; }
-	};
-	var sym_map_ptr: *align(4) XkbSymMap = @ptrCast(type_ptr);
-	for (0..map_info.nKeySyms) |i| {
-		key_sym_maps[i] = .{
-			.type_indices = sym_map_ptr.type_index,
-			.width = sym_map_ptr.width,
-			.syms = @as([*]u32, @ptrCast(&sym_map_ptr.data))
-				[0..sym_map_ptr.n_syms],
-		};
-		sym_map_ptr = @ptrFromInt(@intFromPtr(sym_map_ptr)
-			+ sym_map_ptr.getSize());
-	}
-	const key_types_real_start = key_types.ptr - map_info.firstType;
-	const key_sym_maps_real_start = key_sym_maps.ptr - map_info.firstKeySym;
-	return .{
-		key_types_real_start[0..map_info.totalTypes],
-		key_sym_maps_real_start[0..map_info.totalSyms],
-	};
-}
-
-fn getKeySym(event: *const xcb.xcb_key_press_event_t) u32 {
-	const code = event.detail;
-	const state: KeyState = @bitCast(event.state);
-	return keyboard_sym_maps[code].getSym(keyboard_types, state);
 }
 
 pub const Event = union(enum) {
@@ -213,76 +115,99 @@ pub const Event = union(enum) {
 		redraw_required: bool
 	},
 	/// a key was pressed/released
-	key: struct { win: *Window, down: bool, code: u16, sym: u32 },
+	key: struct { win: *Window, down: bool, info: char.KeyInfo },
 };
+
+fn findWindow(window_id: xcb.xcb_window_t, windows: []Window) Error!*Window {
+	for (0..windows.len) |i| if (windows[i].id == window_id)
+		return &windows[i];
+	return error.WindowNotFound;
+}
 
 fn handleXcbEvent(
 	xcb_event: *xcb.xcb_generic_event_t,
 	windows: []Window,
 ) Error!Event { switch (xcb_event.response_type) {
-		0 => {
-			const event =
-				castEvent(xcb.xcb_generic_error_t, xcb_event);
-			logger.err("xcb error {} {}:{}", .{
-				event.*.error_code, event.*.major_code, event.*.minor_code,
-			});
-			return .unknown;
-		},
-		xcb.XCB_EXPOSE => {
-			const event =
-				castEvent(xcb.xcb_expose_event_t, xcb_event);
-			const win = find_window: {
-				for (0..windows.len) |i| if (windows[i].id == event.window)
-					break :find_window &windows[i];
-				return error.WindowNotFound;
-			};
-			win.draw();
-			return .unknown;
-		},
-		xcb.XCB_DESTROY_NOTIFY => {
-			const event =
-				castEvent(xcb.xcb_destroy_notify_event_t, xcb_event);
-			return .{ .destroy = .{
-				.win = find_window: {
-					for (0..windows.len) |i| if (windows[i].id == event.window)
-						break :find_window &windows[i];
-					return error.WindowNotFound;
-				},
+	0 => {
+		logXcbError(eventAs(xcb.xcb_generic_error_t, xcb_event));
+		return .unknown;
+	},
+	xcb.XCB_EXPOSE => {
+		const event = eventAs(xcb.xcb_expose_event_t, xcb_event);
+		const win = try findWindow(event.window, windows);
+		win.draw();
+		return .unknown;
+	},
+	xcb.XCB_DESTROY_NOTIFY => {
+		const event = eventAs(xcb.xcb_destroy_notify_event_t, xcb_event);
+		return .{ .destroy = .{
+			.win = try findWindow(event.window, windows),
+		} };
+	},
+	xcb.XCB_CONFIGURE_NOTIFY => {
+		const event = eventAs(xcb.xcb_configure_notify_event_t, xcb_event);
+		const win = try findWindow(event.window, windows);
+		const redraw_required = try win.resize(event.width, event.height);
+		return .{ .resize = .{
+			.win = win,
+			.width = event.width,
+			.height = event.height,
+			.redraw_required = redraw_required,
+		} };
+	},
+	xcb.XCB_KEY_PRESS, xcb.XCB_KEY_RELEASE => |xcb_type| {
+		const event = eventAs(xcb.xcb_key_press_event_t, xcb_event);
+		const down = xcb_type == xcb.XCB_KEY_PRESS;
+		_ = xcb.xkb_state_update_key(xkb_state, event.detail,
+			if (down) xcb.XKB_KEY_DOWN else xcb.XKB_KEY_UP);
+		const sym = xcb.xkb_state_key_get_one_sym(xkb_state, event.detail);
+		const n: u21 = @intCast(xcb.xkb_keysym_to_utf32(sym));
+
+		var key: char.Key = undefined;
+		if (n < 0x20 or n == 0x7f) {
+			key = .{ .control = switch (sym) {
+				0xff1b => .escape,
+				0xff0d => .enter, 0xff09 => .tab,
+				0xff08 => .backspace, 0xffff => .delete,
+				0xffe5 => .caps_lock,
+				0xffe1 => .shift_l, 0xffe2 => .shift_r,
+				0xffe3 => .ctrl_l, 0xffe4 => .ctrl_r,
+				0xffe9 => .alt_l, 0xffea => .alt_r,
+				0xffeb => .super_l, 0xffec => .super_r,
+				0xff61 => .print_screen,
+				0xff14 => .scroll_lock, 0xff13 => .pause_break,
+				0xffbe...0xffd5 => |e| @enumFromInt(
+					@intFromEnum(char.Key.Control.f_1) + e - 0xffbd),
+				0xff63 => .insert,
+				0xff50 => .home, 0xff57 => .end,
+				0xff55 => .page_up, 0xff56 => .page_down,
+				0xff51 => .left, 0xff52 => .up,
+				0xff53 => .right, 0xff54 => .down,
+				else => .unknown,
 			} };
-		},
-		xcb.XCB_CONFIGURE_NOTIFY => {
-			const event =
-				castEvent(xcb.xcb_configure_notify_event_t, xcb_event);
-			const win = find_window: {
-				for (0..windows.len) |i| if (windows[i].id == event.window)
-					break :find_window &windows[i];
-				return error.WindowNotFound;
-			};
-			const redraw_required = try win.resize(event.width, event.height);
-			return .{ .resize = .{
-				.win = win,
-				.width = event.width,
-				.height = event.height,
-				.redraw_required = redraw_required,
-			} };
-		},
-		xcb.XCB_KEY_PRESS, xcb.XCB_KEY_RELEASE => |xcb_type| {
-			const event =
-				castEvent(xcb.xcb_key_press_event_t, xcb_event);
-			const down = xcb_type == xcb.XCB_KEY_PRESS;
-			return .{ .key = .{
-				.win = find_window: {
-					for (0..windows.len) |i| if (windows[i].id == event.event)
-						break :find_window &windows[i];
-					return error.WindowNotFound;
-				},
-				.down = down,
-				.code = event.detail,
-				.sym = getKeySym(event),
-			} };
-		},
-		else => return .unknown,
-	}
+		} else key = .{ .char = char.fromCode(n) };
+
+		const key_info: char.KeyInfo = .{ .key = key, .mods = .{
+			.shift = xcb.xkb_state_mod_name_is_active(xkb_state,
+				xcb.XKB_MOD_NAME_SHIFT, xcb.XKB_STATE_MODS_EFFECTIVE) > 0,
+			.caps = xcb.xkb_state_mod_name_is_active(xkb_state,
+				xcb.XKB_MOD_NAME_CAPS, xcb.XKB_STATE_MODS_EFFECTIVE) > 0,
+			.ctrl = xcb.xkb_state_mod_name_is_active(xkb_state,
+				xcb.XKB_MOD_NAME_CTRL, xcb.XKB_STATE_MODS_EFFECTIVE) > 0,
+			.alt = xcb.xkb_state_mod_name_is_active(xkb_state,
+				xcb.XKB_VMOD_NAME_ALT, xcb.XKB_STATE_MODS_EFFECTIVE) > 0,
+			.super = xcb.xkb_state_mod_name_is_active(xkb_state,
+				xcb.XKB_VMOD_NAME_SUPER, xcb.XKB_STATE_MODS_EFFECTIVE) > 0,
+		} };
+
+		return .{ .key = .{
+			.win = try findWindow(event.event, windows),
+			.down = down,
+			.info = key_info,
+		} };
+	},
+	else => return .unknown,
+}
 }
 
 pub fn pollEvent(w: []Window) Error!?Event {

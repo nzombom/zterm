@@ -18,6 +18,8 @@ pub fn build(b: *std.Build) void {
 	exe.linkSystemLibrary("xcb-render");
 	exe.linkSystemLibrary("xcb-xkb");
 	exe.linkSystemLibrary("xcb-render-util");
+	exe.linkSystemLibrary("xkbcommon");
+	exe.linkSystemLibrary("xkbcommon-x11");
 	exe.linkSystemLibrary("fontconfig");
 	exe.linkSystemLibrary("freetype");
 

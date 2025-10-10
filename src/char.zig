@@ -57,7 +57,7 @@ pub fn readUtf8(T: type) fn (*T) T.ReadError!Char {
 /// .writeByte()
 pub fn writeUtf8(T: type) fn (*T, Char) T.WriteError!void {
 	return struct { fn f(t: *T, ch: Char) T.WriteError!void {
-		const c = toCode(ch);
+		const c = ch.toCode();
 		switch (c) {
 			0x000000...0x00007F => try t.writeByte(@truncate(c)),
 			0x000080...0x0007FF => {
@@ -78,3 +78,34 @@ pub fn writeUtf8(T: type) fn (*T, Char) T.WriteError!void {
 		}
 	} }.f;
 }
+
+pub const Key = union(enum) {
+	pub const Control = enum {
+		unknown,
+		escape,
+		enter, tab,
+		backspace, delete,
+		caps_lock,
+		shift_l, shift_r,
+		ctrl_l, ctrl_r,
+		alt_l, alt_r,
+		super_l, super_r,
+		f_1, f_2, f_3, f_4, f_5, f_6, f_7, f_8, f_9, f_10, f_11, f_12,
+		f_13, f_14, f_15, f_16, f_17, f_18, f_19, f_20, f_21, f_22, f_23, f_24,
+		print_screen, scroll_lock, pause_break,
+		insert,
+		home, end,
+		page_up, page_down,
+		left, up, right, down,
+	};
+
+	char: Char, // 0x20 - 0x7e, 0x80 -
+	control: Control,
+};
+pub const Mods = packed struct {
+	shift: bool, caps: bool, ctrl: bool, alt: bool, super: bool,
+};
+pub const KeyInfo = struct {
+	key: Key,
+	mods: Mods,
+};
