@@ -29,7 +29,7 @@ fn startRedraw(updated: *i64, timeout: *?u64) void {
 	}
 }
 
-pub fn main() anyerror!void {
+pub fn main() !void {
 	try font.init();
 	defer font.deinit();
 	try display.init();
@@ -53,11 +53,13 @@ pub fn main() anyerror!void {
 		config.default_height);
 	defer scr.deinit();
 
-	var pty = try Pty.init("sh", &.{ "sh" });
+	const pty = try Pty.init(allocator, "sh", &.{ "sh" }, "zterm");
 	defer pty.deinit();
 
 	var updated: i64 = undefined;
 	var timeout: ?u64 = null;
+
+	var parser: char.EscapeParser = .init();
 
 	while (true) {
 		const has_event = try display.pollEvent((&win)[0..1]);
@@ -73,19 +75,21 @@ pub fn main() anyerror!void {
 				timeout = null;
 			},
 			.key => |key| {
-				if (key.down) if (key.info.key == .char) {
-					logger.info("{c}", .{ key.info.key.char[0] });
-					try scr.putChar(key.info.key.char);
+				if (key.event.down) {
+					const str = key.event.toString();
+					try pty.writeString(str.data[0..str.len]);
 					startRedraw(&updated, &timeout);
-				};
+				}
 			},
 			else => {},
 		};
 
-		if (try pty.readable()) {
-			try scr.putChar(try pty.readChar());
-			startRedraw(&updated, &timeout);
-		}
+		const maybe_byte = pty.readByte() catch |err| switch (err) {
+			error.EndOfStream => std.process.exit(0),
+			else => return err,
+		};
+		if (maybe_byte) |b| if (parser.parse(b)) |t| try scr.putToken(t);
+		startRedraw(&updated, &timeout);
 
 		if (timeout != null) {
 			if (std.time.milliTimestamp() - updated > timeout.?) {

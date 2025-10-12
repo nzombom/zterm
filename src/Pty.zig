@@ -5,69 +5,59 @@ const std = @import("std");
 const char = @import("char.zig");
 const pty_h = @cImport(@cInclude("pty.h"));
 
-pub const InitError = error { OutOfMemory, OpenFailed, ForkFailed };
-pub const ReadError = error { EndOfStream, ReadFailed };
-pub const WriteError = error { EndOfStream, WriteFailed };
+pub const Error = error { OutOfMemory, InitFailed, IOFailed, EndOfStream };
 
+/// handle to the pty
 m: std.fs.File,
-/// object remembers one byte for utf-8 error handling. when a byte is supposed
-/// to be a continuation but is not, the extra byte is stored here with
-/// .returnByte()
-byte: ?u8,
 
 pub fn init(
+	allocator: std.mem.Allocator,
 	command: [*:0]const u8,
-	argv: [*:null]const ?[*:0]const u8
-) InitError!Pty {
+	argv: [*:null]const ?[*:0]const u8,
+	terminfo_name: []const u8,
+) Error!Pty {
 	var fd: i32 = 0;
 	const pid = pty_h.forkpty(&fd, null, null, null);
 	switch (pid) {
-		-1 => return InitError.OpenFailed,
+		-1 => return error.InitFailed,
 		0 => {
-			std.posix.execvpeZ(command, argv, std.c.environ)
-				catch return InitError.ForkFailed;
-			},
-			else => {},
+			var env_map = std.process.getEnvMap(allocator)
+				catch return error.OutOfMemory;
+			try env_map.put("TERM", terminfo_name);
+			std.posix.execvpeZ(command, argv,
+				try std.process.createEnvironFromMap(allocator, &env_map, .{}))
+				catch return error.InitFailed;
+		},
+		else => {
+			_ = std.posix.fcntl(fd, std.posix.F.SETFL,
+				@intCast(@as(u32, @bitCast(std.posix.O{ .NONBLOCK = true, }))))
+				catch return error.InitFailed;
+			return .{ .m = .{ .handle = fd } };
+		},
 	}
-	return .{ .m = .{ .handle = fd }, .byte = null };
 }
 
 pub fn deinit(pty: *const Pty) void {
 	pty.m.close();
 }
 
-pub fn returnByte(pty: *Pty, b: u8) void { pty.byte = b; }
-
-pub fn readable(pty: *const Pty) ReadError!bool {
-	var c: i32 = undefined;
-	if (std.c.ioctl(pty.m.handle, std.c.T.FIONREAD, &c) < 0)
-		return error.ReadFailed;
-	return c > 0;
-}
-
-pub fn readByte(pty: *Pty) ReadError!u8 {
-	if (pty.byte != null) {
-		const b = pty.byte;
-		pty.byte = null;
-		return b.?;
-	}
+pub fn readByte(pty: *const Pty) Error!?u8 {
 	var c: u8 = undefined;
-	if (pty.m.read((&c)[0..1]) catch |err| {
-		if (err == std.posix.ReadError.InputOutput)
-			return ReadError.EndOfStream
-		else return ReadError.ReadFailed;
-	} != 1) return ReadError.EndOfStream;
+	if (pty.m.read((&c)[0..1]) catch |err| switch (err) {
+		error.InputOutput => return error.EndOfStream,
+		error.WouldBlock => return null,
+		else => return error.IOFailed,
+	} != 1) return error.EndOfStream;
 	return c;
 }
 
-pub const readChar = char.readUtf8(Pty);
-
-pub fn writeByte(pty: *const Pty, c: u8) WriteError!void {
-	if (pty.m.write((&c)[0..1]) catch |err| {
-		if (err == std.posix.WriteError.InputOutput)
-			return WriteError.EndOfStream
-		else return WriteError.WriteFailed;
-	} != 1) return WriteError.EndOfStream;
+pub fn writeByte(pty: *const Pty, c: u8) Error!void {
+	if (pty.m.write((&c)[0..1]) catch |err| switch (err) {
+		error.InputOutput => return error.EndOfStream,
+		else => return error.IOFailed,
+	} != 1) return error.EndOfStream;
 }
 
-pub const writeChar = char.writeUtf8(Pty);
+pub fn writeString(pty: *const Pty, str: []const u8) Error!void {
+	for (str) |b| try pty.writeByte(b);
+}

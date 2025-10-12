@@ -115,7 +115,7 @@ pub const Event = union(enum) {
 		redraw_required: bool
 	},
 	/// a key was pressed/released
-	key: struct { win: *Window, down: bool, info: char.KeyInfo },
+	key: struct { win: *Window, event: char.KeyEvent },
 };
 
 fn findWindow(window_id: xcb.xcb_window_t, windows: []Window) Error!*Window {
@@ -164,11 +164,8 @@ fn handleXcbEvent(
 		const n: u21 = @intCast(xcb.xkb_keysym_to_utf32(sym));
 
 		var key: char.Key = undefined;
-		if (n < 0x20 or n == 0x7f) {
+		if (n == 0) {
 			key = .{ .control = switch (sym) {
-				0xff1b => .escape,
-				0xff0d => .enter, 0xff09 => .tab,
-				0xff08 => .backspace, 0xffff => .delete,
 				0xffe5 => .caps_lock,
 				0xffe1 => .shift_l, 0xffe2 => .shift_r,
 				0xffe3 => .ctrl_l, 0xffe4 => .ctrl_r,
@@ -177,7 +174,7 @@ fn handleXcbEvent(
 				0xff61 => .print_screen,
 				0xff14 => .scroll_lock, 0xff13 => .pause_break,
 				0xffbe...0xffd5 => |e| @enumFromInt(
-					@intFromEnum(char.Key.Control.f_1) + e - 0xffbd),
+					@intFromEnum(char.Key.Control.f_1) + e - 0xffbe),
 				0xff63 => .insert,
 				0xff50 => .home, 0xff57 => .end,
 				0xff55 => .page_up, 0xff56 => .page_down,
@@ -187,7 +184,7 @@ fn handleXcbEvent(
 			} };
 		} else key = .{ .char = char.fromCode(n) };
 
-		const key_info: char.KeyInfo = .{ .key = key, .mods = .{
+		const key_event: char.KeyEvent = .{ .down = down, .key = key, .mods = .{
 			.shift = xcb.xkb_state_mod_name_is_active(xkb_state,
 				xcb.XKB_MOD_NAME_SHIFT, xcb.XKB_STATE_MODS_EFFECTIVE) > 0,
 			.caps = xcb.xkb_state_mod_name_is_active(xkb_state,
@@ -202,8 +199,7 @@ fn handleXcbEvent(
 
 		return .{ .key = .{
 			.win = try findWindow(event.event, windows),
-			.down = down,
-			.info = key_info,
+			.event = key_event,
 		} };
 	},
 	else => return .unknown,

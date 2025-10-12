@@ -101,14 +101,18 @@ pub fn resize(scr: *Screen, width: u16, view_height: u16) Error!void {
 
 /// move the cursor down, scrolling if necessary and scroll is true
 pub fn cursorDown(scr: *Screen, scroll: bool) Error!void {
+	scr.lineAt(scr.cursor_y).redraw = true;
 	if (scr.cursor_y > 0) scr.cursor_y -= 1 else if (scroll) {
 		try scr.addLines(1);
 		scr.cursor_y = 0;
 	}
+	scr.lineAt(scr.cursor_y).redraw = true;
 }
 /// move the cursor up
 pub fn cursorUp(scr: *Screen) Error!void {
+	scr.lineAt(scr.cursor_y).redraw = true;
 	if (scr.cursor_y < scr.view_height) scr.cursor_y += 1;
+	scr.lineAt(scr.cursor_y).redraw = true;
 }
 /// move the cursor right, wrapping lines if necessary and wrap is true
 pub fn cursorRight(scr: *Screen, wrap: bool) Error!void {
@@ -119,18 +123,37 @@ pub fn cursorRight(scr: *Screen, wrap: bool) Error!void {
 }
 /// move the cursor left
 pub fn cursorLeft(scr: *Screen) Error!void {
+	scr.lineAt(scr.cursor_y).redraw = true;
 	if (scr.cursor_x > 0) scr.cursor_x -= 1;
 }
 
 /// put a char under the cursor (TODO: this should handle esc seqs as well)
 pub fn putChar(scr: *Screen, c: char.Char) Error!void {
-	if (char.toCode(c) == 0x0a) {
-		try scr.cursorDown(true);
-		return;
+	switch (char.toCode(c)) {
+		0x08 => try scr.cursorLeft(),
+		0x09 => {
+			const to = (scr.cursor_x / 8 + 1) * 8;
+			scr.cursor_x = if (to >= scr.width) scr.width - 1 else to;
+		},
+		0x0a => scr.cursor_x = 0,
+		0x0b => try scr.cursorDown(true),
+		0x0d => {
+			scr.cursor_x = 0;
+			try scr.cursorDown(true);
+		},
+		else => {
+			scr.lineAt(scr.cursor_y).c[scr.cursor_x] = c;
+			scr.lineAt(scr.cursor_y).redraw = true;
+			try scr.cursorRight(true);
+		}
 	}
-	scr.lineAt(scr.cursor_y).c[scr.cursor_x] = c;
-	scr.lineAt(scr.cursor_y).redraw = true;
-	try scr.cursorRight(true);
+}
+
+pub fn putToken(scr: *Screen, t: char.Token) Error!void {
+	switch (t) {
+		.c => |c| try scr.putChar(c),
+		.e => {},
+	}
 }
 
 /// set every line to requiring a redraw (should use this if window pixel
