@@ -57,11 +57,26 @@ pub fn init() Error!void {
 	}
 	screen = screen_iter.data;
 
-	const xrender_info = xcb.xcb_get_extension_data(connection,
-		&xcb.xcb_render_id);
+	var err: ?*xcb.xcb_generic_error_t = null;
+	const xrender_info = xcb.xcb_query_extension_reply(connection,
+		xcb.xcb_query_extension(connection,
+			"RENDER".len, "RENDER"), &err);
+	if (err != null) {
+		logXcbError(err.?);
+		std.c.free(err.?);
+		return error.InitFailed;
+	}
 	if (xrender_info.*.present == 0) return error.InitFailed;
-	const xkb_info = xcb.xcb_get_extension_data(connection,
-		&xcb.xcb_xkb_id);
+
+	err = null;
+	const xkb_info = xcb.xcb_query_extension_reply(connection,
+		xcb.xcb_query_extension(connection,
+			"XKEYBOARD".len, "XKEYBOARD"), &err);
+	if (err != null) {
+		logXcbError(err.?);
+		std.c.free(err.?);
+		return error.InitFailed;
+	}
 	if (xkb_info.*.present == 0) return error.InitFailed;
 
 	const formats_query = xcb.xcb_render_util_query_formats(connection);
