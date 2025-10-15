@@ -1,3 +1,4 @@
+/// font to use
 pub const font: [:0]const u8 = "monospace:size=12";
 
 // colors are 0xaarrggbb

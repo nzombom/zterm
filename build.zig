@@ -13,15 +13,20 @@ pub fn build(b: *std.Build) void {
 		}),
 	});
 
+	const system_libraries: []const []const u8 = &.{
+		"xcb",
+		"xcb-render",
+		"xcb-xkb",
+		"xcb-render-util",
+		"xkbcommon",
+		"xkbcommon-x11",
+		"fontconfig",
+		"freetype",
+	};
 	exe.linkLibC();
-	exe.linkSystemLibrary("xcb");
-	exe.linkSystemLibrary("xcb-render");
-	exe.linkSystemLibrary("xcb-xkb");
-	exe.linkSystemLibrary("xcb-render-util");
-	exe.linkSystemLibrary("xkbcommon");
-	exe.linkSystemLibrary("xkbcommon-x11");
-	exe.linkSystemLibrary("fontconfig");
-	exe.linkSystemLibrary("freetype");
+	for (system_libraries) |lib| {
+		exe.linkSystemLibrary(lib);
+	}
 
 	b.installArtifact(exe);
 

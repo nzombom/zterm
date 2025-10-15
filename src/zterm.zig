@@ -5,14 +5,13 @@ const display = @import("display/x_xrender.zig");
 const font = @import("font.zig");
 const Pty = @import("Pty.zig");
 const Screen = @import("Screen.zig");
-
 const log = @import("log.zig");
 pub const std_options: std.Options = .{
 	.log_level = .debug,
 	.logFn = log.logFn,
 };
-const logger = std.log.scoped(.main);
 
+const logger = std.log.scoped(.main);
 const allocator = std.heap.smp_allocator;
 
 fn startRedraw(updated: *i64, timeout: *?u64) void {
@@ -49,8 +48,7 @@ pub fn main() !void {
 	display.flush();
 
 	var scr = try Screen.init(allocator,
-		config.default_width,
-		config.default_height);
+		config.default_width, config.default_height);
 	defer scr.deinit();
 
 	const pty = try Pty.init(allocator, "sh", &.{ "sh" }, "zterm");
@@ -59,9 +57,10 @@ pub fn main() !void {
 	var updated: i64 = undefined;
 	var timeout: ?u64 = null;
 
-	var parser: char.EscapeParser = .init();
+	var parser: char.Parser = .init(allocator);
 
 	while (true) {
+		try scr.validate();
 		const has_event = try display.pollEvent((&win)[0..1]);
 		if (has_event) |event| switch (event) {
 			.destroy => break,
@@ -88,7 +87,8 @@ pub fn main() !void {
 			error.EndOfStream => std.process.exit(0),
 			else => return err,
 		};
-		if (maybe_byte) |b| if (parser.parse(b)) |t| try scr.putToken(t);
+		if (maybe_byte) |b| if (try parser.parse(b)) |t|
+			try scr.putToken(t, true);
 		startRedraw(&updated, &timeout);
 
 		if (timeout != null) {

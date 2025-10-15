@@ -14,6 +14,7 @@ var ft_lib: ft.FT_Library = undefined;
 
 pub const Error = error { OutOfMemory, InitFailed, OpenFailed, DrawFailed };
 
+/// initialize the libraries
 pub fn init() Error!void {
 	if (fc.FcInit() == 0) return error.InitFailed;
 	logger.debug("loaded fontconfig version {}", .{ fc.FcGetVersion() });
@@ -25,15 +26,20 @@ pub fn init() Error!void {
 	logger.debug("loaded freetype version {}.{}.{}",
 		.{ major, minor, patch });
 }
+/// deinit & exit
 pub fn deinit() void {
 	fc.FcFini();
 	_ = ft.FT_Done_FreeType(ft_lib);
 }
 
+/// the mode of drawing
 pub const PixelMode = enum {
-	mono,	 // u1; black and white only
-	gray,	 // u8; antialiased, 256 values of gray
-	lcd,	 // u24; subpixel rendering, 0xrrggbb
+	/// u1; black and white only
+	mono,
+	/// u8; antialiased, 256 grays
+	gray,
+	/// u24; subpixel rendering, 0xrrggbb
+	lcd,
 
 	pub fn bitSize(m: PixelMode) u8 { return switch (m) {
 		.mono => 1, .gray => 8, .lcd => 24,

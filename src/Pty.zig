@@ -36,9 +36,10 @@ pub fn init(
 		},
 	}
 }
+pub fn deinit(pty: *const Pty) void { pty.m.close(); }
 
-pub fn deinit(pty: *const Pty) void {
-	pty.m.close();
+pub fn getTermios(pty: *const Pty) std.posix.termios {
+	return std.posix.tcgetattr(pty.m.handle) catch unreachable;
 }
 
 pub fn readByte(pty: *const Pty) Error!?u8 {
