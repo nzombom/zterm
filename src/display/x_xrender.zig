@@ -4,6 +4,7 @@ const std = @import("std");
 const config = @import("../config.zig");
 const char = @import("../char.zig");
 const font = @import("../font.zig");
+const Screen = @import("../Screen.zig");
 const xcb = @cImport({
 	@cInclude("xcb/xcb.h");
 	@cInclude("xcb/render.h");
@@ -64,6 +65,7 @@ pub fn init() Error!void {
 	if (err != null) {
 		logXcbError(err.?);
 		std.c.free(err.?);
+		logger.err("fatal: xrender not found", .{});
 		return error.InitFailed;
 	}
 	if (xrender_info.*.present == 0) return error.InitFailed;
@@ -75,6 +77,7 @@ pub fn init() Error!void {
 	if (err != null) {
 		logXcbError(err.?);
 		std.c.free(err.?);
+		logger.err("fatal: xkb not found", .{});
 		return error.InitFailed;
 	}
 	if (xkb_info.*.present == 0) return error.InitFailed;
@@ -87,7 +90,7 @@ pub fn init() Error!void {
 			xcb.XCB_PICT_STANDARD_A_8),
 		xcb.xcb_render_util_find_standard_format(formats_query,
 			xcb.XCB_PICT_STANDARD_RGB_24),
-		};
+	};
 
 	if (xcb.xcb_xkb_use_extension_reply(connection,
 			xcb.xcb_xkb_use_extension_unchecked(connection, 1, 0),
@@ -249,6 +252,8 @@ const PreparedBitmap = struct {
 			.pixmap = 0, .picture = 0, .bitmap = bitmap,
 		};
 
+		if (bitmap.mode == .mono) bitmap.reverseBitOrder();
+
 		const prepared: PreparedBitmap = .{
 			.pixmap = xcb.xcb_generate_id(connection),
 			.picture = xcb.xcb_generate_id(connection),
@@ -282,45 +287,59 @@ const GlyphSet = std.AutoArrayHashMapUnmanaged(u32, PreparedBitmap);
 
 pub const DisplayFont = struct {
 	allocator: std.mem.Allocator,
-	face: font.Face,
+	faces: [6]font.Face,
 	mode: font.PixelMode,
+	cw: u16, ch: u16,
 	/// opaque
-	gs: GlyphSet,
+	glyphsets: [6]GlyphSet,
 
 	pub fn init(
 		allocator: std.mem.Allocator,
-		name: [:0]const u8, mode: font.PixelMode,
+		names: [6][:0]const u8, mode: font.PixelMode,
 	) Error!DisplayFont {
+		var df: DisplayFont = .{
+			.allocator = allocator,
+			.faces = undefined,
+			.mode = mode,
+			.cw = undefined, .ch = undefined,
+			.glyphsets = undefined,
+		};
+
 		const dpi_x = @as(f32, @floatFromInt(screen.width_in_pixels)) /
 			(@as(f32, @floatFromInt(screen.width_in_millimeters)) / 25.4);
-
-		const df: DisplayFont = .{
-			.allocator = allocator,
-			.face = font.Face.init(name, @intFromFloat(dpi_x))
-				catch return error.FontOpenFailed,
-			.mode = mode,
-			.gs = .empty,
-		};
+		var max_width: u16 = 0;
+		var max_height: u16 = 0;
+		for (0..6, names) |i, name| {
+			df.faces[i] = font.Face.init(name, @intFromFloat(dpi_x))
+				catch return error.FontOpenFailed;
+			max_width = @max(max_width, df.faces[i].width);
+			max_height = @max(max_height, df.faces[i].height);
+			df.glyphsets[i] = .empty;
+		}
+		df.cw = max_width;
+		df.ch = max_height;
 		return df;
 	}
 
 	pub fn deinit(df: *DisplayFont) void {
-		var it = df.gs.iterator();
-		while (it.next()) |g| g.value_ptr.deinit();
-		df.gs.deinit(df.allocator);
-		df.face.deinit();
+		for (0..6, df.faces, &df.glyphsets) |_, face, *glyphset| {
+			var it = glyphset.iterator();
+			while (it.next()) |g| g.value_ptr.deinit();
+			glyphset.deinit(df.allocator);
+			face.deinit();
+		}
 	}
 
 	fn getGlyphFromChar(
-		df: *DisplayFont, c: char.Char,
+		df: *DisplayFont, c: char.Char, index: u3,
 	) Error!PreparedBitmap {
 		const code = char.toCode(c);
-		return df.gs.get(code) orelse {
+		return df.glyphsets[index].get(code) orelse {
 			const g = PreparedBitmap.init(df.allocator,
-				df.face.renderGlyph(df.allocator,
-					df.face.getCharGlyphIndex(code), df.mode)
+				df.faces[index].renderGlyph(df.allocator,
+					df.faces[index].getCharGlyphIndex(code), df.mode)
 				catch return error.RenderGlyphFailed);
-			try df.gs.put(df.allocator, code, g);
+			try df.glyphsets[index].put(df.allocator, code, g);
 			return g;
 		};
 	}
@@ -380,7 +399,7 @@ pub const Window = struct {
 			| xcb.XCB_CW_EVENT_MASK
 			| xcb.XCB_CW_BIT_GRAVITY;
 		_ = xcb.xcb_create_window_value_list_serialize(&values, value_mask, &.{
-			.background_pixel = config.background_color,
+			.background_pixel = config.default_bg,
 			.event_mask = xcb.XCB_EVENT_MASK_EXPOSURE
 				| xcb.XCB_EVENT_MASK_STRUCTURE_NOTIFY
 				| xcb.XCB_EVENT_MASK_KEY_PRESS
@@ -399,9 +418,10 @@ pub const Window = struct {
 				win.picture, win.pixmap.id, render_formats[2].id, 0, null),
 			error.WindowOpenFailed);
 		_ = xcb.xcb_render_composite(connection, xcb.XCB_RENDER_PICT_OP_SRC,
-			(try win.getColor(config.background_color)).picture,
+			(try win.getColor(config.default_bg)).picture,
 			0, win.picture, 0, 0, 0, 0, 0, 0, width, height);
 
+		logger.debug("opened window xcb:{}", .{ win.id });
 		return win;
 	}
 
@@ -436,7 +456,7 @@ pub const Window = struct {
 			_ = xcb.xcb_render_create_picture(connection,
 				win.picture, win.pixmap.id, render_formats[2].id, 0, null);
 			_ = xcb.xcb_render_composite(connection, xcb.XCB_RENDER_PICT_OP_SRC,
-				(try win.getColor(config.background_color)).picture,
+				(try win.getColor(config.default_bg)).picture,
 				0, win.picture, 0, 0, 0, 0, 0, 0, new_width, new_height);
 			return true;
 		} else return false;
@@ -461,21 +481,49 @@ pub const Window = struct {
 			prepared.bitmap.w, prepared.bitmap.h);
 	}
 
+	/// render the background of cell (cx, cy)
+	pub fn renderCellBackground(
+		win: *Window, df: *DisplayFont,
+		color: Color, cx: u16, cy: u16,
+	) void {
+		const y_pos = win.pixmap.height - df.ch * (cy + 1);
+		_ = xcb.xcb_render_composite(connection, xcb.XCB_RENDER_PICT_OP_SRC,
+			color.picture, 0, win.picture, 0, 0, 0, 0,
+			@intCast(cx * df.cw), @intCast(y_pos),
+			@intCast(df.cw), @intCast(df.ch));
+	}
+
 	/// render a char at cell (cx, cy) where cy = 0 at the BOTTOM
 	pub fn renderChar(
 		win: *Window, df: *DisplayFont,
-		c: char.Char, cx: u16, cy: u16, bg: u32, fg: u32,
+		c: Screen.Cell, cx: u16, cy: u16,
 	) Error!void {
-		const y_pos = win.pixmap.height - df.face.height * (cy + 1);
-		_ = xcb.xcb_render_composite(connection, xcb.XCB_RENDER_PICT_OP_SRC,
-			(try win.getColor(bg)).picture, 0, win.picture, 0, 0, 0, 0,
-			@intCast(cx * df.face.width), @intCast(y_pos),
-			@intCast(df.face.width), @intCast(df.face.height));
-		if (std.meta.eql(c, char.null_char)) return;
-		win.renderBitmap(try df.getGlyphFromChar(c),
-			@intCast(cx * df.face.width),
-			@intCast(y_pos + df.face.baseline),
-			try win.getColor(fg));
+		const g = c.graphic;
+		const y_pos = win.pixmap.height - df.ch * (cy + 1);
+		var bg_hex = switch (c.graphic.color_types.bg) {
+			.default => config.default_bg,
+			.four_bit => config.four_bit_colors[c.graphic.colors.bg],
+		};
+		var fg_hex = switch (c.graphic.color_types.fg) {
+			.default => config.default_fg,
+			.four_bit => config.four_bit_colors[c.graphic.colors.fg],
+		};
+		if (g.color_types.cursor) {
+			bg_hex = config.cursor_bg orelse bg_hex;
+			fg_hex = config.cursor_fg orelse fg_hex;
+		}
+
+		const font_index = @intFromEnum(g.attrs.intensity)
+			+ @as(u3, if (g.attrs.italic) 3 else 0);
+
+		win.renderCellBackground(df, try win.getColor(bg_hex), cx, cy);
+
+		if (std.meta.eql(c.char, char.null_char)) return;
+
+		win.renderBitmap(try df.getGlyphFromChar(c.char, font_index),
+			@intCast(cx * df.cw),
+			@intCast(y_pos + df.faces[font_index].baseline),
+			try win.getColor(fg_hex));
 	}
 
 	fn getColor(win: *Window, hex: u32) Error!Color {

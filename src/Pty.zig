@@ -41,6 +41,17 @@ pub fn deinit(pty: *const Pty) void { pty.m.close(); }
 pub fn getTermios(pty: *const Pty) std.posix.termios {
 	return std.posix.tcgetattr(pty.m.handle) catch unreachable;
 }
+pub fn putTermios(pty: *const Pty, termios: std.posix.termios) void {
+	std.posix.tcsetattr(pty.m.handle, ._, termios);
+}
+
+pub fn setScreenSize(pty: *const Pty, w: u16, h: u16) void {
+	_ = std.os.linux.ioctl(pty.m.handle, std.os.linux.T.IOCSWINSZ,
+		@intFromPtr(&std.posix.winsize{
+			.row = h, .col = w,
+			.xpixel = 0, .ypixel = 0
+		}));
+}
 
 pub fn readByte(pty: *const Pty) Error!?u8 {
 	var c: u8 = undefined;

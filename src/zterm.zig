@@ -3,6 +3,7 @@ const config = @import("config.zig");
 const char = @import("char.zig");
 const display = @import("display/x_xrender.zig");
 const font = @import("font.zig");
+const escape = @import("escape.zig");
 const Pty = @import("Pty.zig");
 const Screen = @import("Screen.zig");
 const log = @import("log.zig");
@@ -34,30 +35,31 @@ pub fn main() !void {
 	try display.init();
 	defer display.deinit();
 
-	var df = try display.DisplayFont.init(allocator, config.font, .gray);
+	var df = try display.DisplayFont.init(allocator, config.fonts, .gray);
 	defer df.deinit();
 	var win = try display.Window.open(allocator,
-		config.default_width * df.face.width,
-		config.default_height * df.face.height);
+		config.default_width * df.cw,
+		config.default_height * df.ch);
 	defer win.close();
 
-	win.setResizeGrid(df.face.width, df.face.height);
+	win.setResizeGrid(df.cw, df.ch);
 	win.setTitle("zterm");
 	try win.setClass("zterm", "zterm");
 	win.draw();
 	display.flush();
 
 	var scr = try Screen.init(allocator,
-		config.default_width, config.default_height);
+		config.default_width, config.default_height,
+		config.max_scrollback);
 	defer scr.deinit();
 
-	const pty = try Pty.init(allocator, "sh", &.{ "sh" }, "zterm");
+	const pty = try Pty.init(allocator, "bash", &.{ "bash" }, "zterm");
 	defer pty.deinit();
 
 	var updated: i64 = undefined;
 	var timeout: ?u64 = null;
 
-	var parser: char.Parser = .init(allocator);
+	var parser: escape.Parser = .init(allocator);
 
 	while (true) {
 		try scr.validate();
@@ -65,13 +67,15 @@ pub fn main() !void {
 		if (has_event) |event| switch (event) {
 			.destroy => break,
 			.resize => |resize| {
-				try scr.resize(resize.width / df.face.width,
-					resize.height / df.face.height);
+				const cw = resize.width / df.cw;
+				const ch = resize.height / df.ch;
+				try scr.resize(cw, ch);
 				if (resize.redraw_required) scr.prepareRedraw();
 				try scr.draw(display, &win, &df);
 				win.draw();
 				display.flush();
 				timeout = null;
+				pty.setScreenSize(cw, ch);
 			},
 			.key => |key| {
 				if (key.event.down) {
@@ -79,6 +83,7 @@ pub fn main() !void {
 					try pty.writeString(str.data[0..str.len]);
 					startRedraw(&updated, &timeout);
 				}
+				scr.scrollToCursor();
 			},
 			else => {},
 		};
@@ -88,7 +93,7 @@ pub fn main() !void {
 			else => return err,
 		};
 		if (maybe_byte) |b| if (try parser.parse(b)) |t|
-			try scr.putToken(t, true);
+			try escape.handleToken(&scr, &pty, t, true);
 		startRedraw(&updated, &timeout);
 
 		if (timeout != null) {

@@ -47,7 +47,8 @@ pub const PixelMode = enum {
 };
 
 pub const Bitmap = struct {
-	x: i16, y: i16, // positive y = down
+	// positive y = down
+	x: i16, y: i16,
 	w: u16, h: u16,
 	pitch: u16,
 	mode: PixelMode,
@@ -72,6 +73,10 @@ pub const Bitmap = struct {
 	pub fn deinit(bitmap: *const Bitmap, allocator: std.mem.Allocator) void {
 		allocator.free(bitmap.data);
 	}
+
+	pub fn reverseBitOrder(bitmap: *const Bitmap) void {
+		for (bitmap.data) |*c| c.* = @bitReverse(c.*);
+	}
 };
 
 pub const Face = struct {
@@ -87,7 +92,6 @@ pub const Face = struct {
 
 	/// load a face given a fontconfig string
 	pub fn init(query: [*:0]const u8, dpi: u16) Error!Face {
-		logger.debug("loading font \"{s}\"", .{ query });
 		const search_pattern = fc.FcNameParse(query);
 		defer fc.FcPatternDestroy(search_pattern);
 		fc.FcDefaultSubstitute(search_pattern);
@@ -136,17 +140,7 @@ pub const Face = struct {
 			- face.*.size.*.metrics.descender) >> 6);
 		const px_baseline: u16 = @intCast(face.*.size.*.metrics.ascender >> 6);
 
-		logger.debug(
-			\\found font:
-			\\  file: {s},
-			\\  index: {},
-			\\  size: {}pt = {}px at {} dpi
-			\\  dimensions: {}x{} (px), baseline {}px
-			, .{
-				file, index,
-				size, @as(u16, @intFromFloat(size)) * dpi / 72, dpi,
-				px_width, px_height, px_baseline,
-			});
+		logger.debug("found font \"{s}\" at {s}", .{ query, file });
 		return .{
 			.ft_face = face,
 			.width = px_width, .height = px_height,

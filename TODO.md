@@ -1,0 +1,2 @@
+# TODO
+- handle termios attrs
