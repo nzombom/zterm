@@ -176,8 +176,11 @@ fn handleXcbEvent(
 	xcb.XCB_KEY_PRESS, xcb.XCB_KEY_RELEASE => |xcb_type| {
 		const event = eventAs(xcb.xcb_key_press_event_t, xcb_event);
 		const down = xcb_type == xcb.XCB_KEY_PRESS;
-		_ = xcb.xkb_state_update_key(xkb_state, event.detail,
-			if (down) xcb.XKB_KEY_DOWN else xcb.XKB_KEY_UP);
+		// _ = xcb.xkb_state_update_key(xkb_state, event.detail,
+			// if (down) xcb.XKB_KEY_DOWN else xcb.XKB_KEY_UP);
+		_ = xcb.xkb_state_update_mask(xkb_state,
+			event.state, event.state, event.state,
+			0, 0, 0);
 		const sym = xcb.xkb_state_key_get_one_sym(xkb_state, event.detail);
 		const n: u21 = @intCast(xcb.xkb_keysym_to_utf32(sym));
 
@@ -252,21 +255,19 @@ const PreparedBitmap = struct {
 			.pixmap = 0, .picture = 0, .bitmap = bitmap,
 		};
 
-		if (bitmap.mode == .mono) bitmap.reverseBitOrder();
-
 		const prepared: PreparedBitmap = .{
 			.pixmap = xcb.xcb_generate_id(connection),
 			.picture = xcb.xcb_generate_id(connection),
 			.bitmap = bitmap,
 		};
 
-		_ = xcb.xcb_create_pixmap(connection, bitmap.mode.bitSize(),
+		_ = xcb.xcb_create_pixmap(connection, bitmap.mode.colorDepth(),
 			prepared.pixmap, screen.root, bitmap.w, bitmap.h);
 		const gc = xcb.xcb_generate_id(connection);
 		_ = xcb.xcb_create_gc(connection, gc, prepared.pixmap, 0, null);
 		_ = xcb.xcb_put_image(connection, xcb.XCB_IMAGE_FORMAT_Z_PIXMAP,
 			prepared.pixmap, gc, bitmap.w, bitmap.h, 0, 0,
-			0, bitmap.mode.bitSize(), bitmap.pitch * bitmap.h,
+			0, bitmap.mode.colorDepth(), bitmap.pitch * bitmap.h,
 			bitmap.data.ptr);
 		_ = xcb.xcb_render_create_picture(connection, prepared.picture,
 			prepared.pixmap, render_formats[@intFromEnum(bitmap.mode)].id,
@@ -283,15 +284,13 @@ const PreparedBitmap = struct {
 	}
 };
 
-const GlyphSet = std.AutoArrayHashMapUnmanaged(u32, PreparedBitmap);
-
 pub const DisplayFont = struct {
 	allocator: std.mem.Allocator,
 	faces: [6]font.Face,
 	mode: font.PixelMode,
 	cw: u16, ch: u16,
 	/// opaque
-	glyphsets: [6]GlyphSet,
+	glyphsets: [6]std.AutoArrayHashMapUnmanaged(u32, PreparedBitmap),
 
 	pub fn init(
 		allocator: std.mem.Allocator,

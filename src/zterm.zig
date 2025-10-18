@@ -35,7 +35,8 @@ pub fn main() !void {
 	try display.init();
 	defer display.deinit();
 
-	var df = try display.DisplayFont.init(allocator, config.fonts, .gray);
+	var df = try display.DisplayFont.init(allocator,
+		config.fonts, config.pixel_mode);
 	defer df.deinit();
 	var win = try display.Window.open(allocator,
 		config.default_width * df.cw,
@@ -75,7 +76,7 @@ pub fn main() !void {
 				win.draw();
 				display.flush();
 				timeout = null;
-				pty.setScreenSize(cw, ch);
+				pty.setScreenSize(cw - 1, ch);
 			},
 			.key => |key| {
 				if (key.event.down) {

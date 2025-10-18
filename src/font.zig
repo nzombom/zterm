@@ -34,16 +34,27 @@ pub fn deinit() void {
 
 /// the mode of drawing
 pub const PixelMode = enum {
-	/// u1; black and white only
+	/// 1 bit: black and white only
 	mono,
-	/// u8; antialiased, 256 grays
+	/// 8 bits: antialiased, 256 grays
 	gray,
-	/// u24; subpixel rendering, 0xrrggbb
+	/// 24 bits: subpixel rendering
 	lcd,
 
-	pub fn bitSize(m: PixelMode) u8 { return switch (m) {
-		.mono => 1, .gray => 8, .lcd => 24,
-	}; }
+	pub fn colorDepth(m: PixelMode) u8 {
+		return switch (m) {
+			.mono => 1,
+			.gray => 8,
+			.lcd => 24,
+		};
+	}
+	pub fn bitSize(m: PixelMode) u8 {
+		return switch (m) {
+			.mono => 1,
+			.gray => 8,
+			.lcd => 24,
+		};
+	}
 };
 
 pub const Bitmap = struct {
@@ -54,28 +65,47 @@ pub const Bitmap = struct {
 	mode: PixelMode,
 	data: []u8,
 
-	pub fn at(bitmap: *const Bitmap, x: u16, y: u16) u32 {
-		return switch (bitmap.mode) {
-			.mono => (bitmap.data[y * bitmap.pitch + x / 8]
-				>> @intCast(7 - x % 8)) % 2,
-			.gray => bitmap.data[y * bitmap.pitch + x],
-			.lcd => (@as(u32, bitmap.data[y * bitmap.pitch + x * 3]) << 16)
-				+ (@as(u32, bitmap.data[y * bitmap.pitch + x * 3 + 1]) << 8)
-				+ @as(u32, bitmap.data[y * bitmap.pitch + x * 3 + 2]),
+	pub fn init(
+		allocator: std.mem.Allocator,
+		x: i16, y: i16,
+		w: u16, h: u16,
+		mode: PixelMode,
+	) Error!Bitmap {
+		const pitch = (w * mode.bitSize() + 31) / 32 * 4;
+		return .{
+			.x = x, .y = y,
+			.w = w, .h = h,
+			.pitch = pitch,
+			.mode = mode,
+			.data = try allocator.alloc(u8, pitch * h),
 		};
 	}
 
-	pub fn paddingBits(bitmap: *const Bitmap) u16 {
-		return bitmap.pitch * 8 - bitmap.w * bitmap.mode.bitSize();
+	/// put the pixel (rgb stores r as the third byte)
+	pub fn putPixel(bitmap: *const Bitmap, x: u16, y: u16, data: u32) void {
+		switch (bitmap.mode) {
+			.mono => {
+				const byte_pos: u3 = @intCast(x % 8);
+				bitmap.data[y * bitmap.pitch + x / 8]
+					&= ~(@as(u8, 1) << byte_pos);
+				bitmap.data[y * bitmap.pitch + x / 8]
+					|= @as(u8, @truncate(data & 1)) << byte_pos;
+			},
+			.gray => bitmap.data[y * bitmap.pitch + x] = @truncate(data),
+			.lcd => {
+				bitmap.data[y * bitmap.pitch + 3 * x]
+					= @truncate(data >> 16);
+				bitmap.data[y * bitmap.pitch + 3 * x + 1]
+					= @truncate(data >> 8);
+				bitmap.data[y * bitmap.pitch + 3 * x + 2]
+					= @truncate(data);
+			},
+		}
 	}
 
 	/// allocator should be the same one used to create .data
 	pub fn deinit(bitmap: *const Bitmap, allocator: std.mem.Allocator) void {
 		allocator.free(bitmap.data);
-	}
-
-	pub fn reverseBitOrder(bitmap: *const Bitmap) void {
-		for (bitmap.data) |*c| c.* = @bitReverse(c.*);
 	}
 };
 
@@ -140,7 +170,8 @@ pub const Face = struct {
 			- face.*.size.*.metrics.descender) >> 6);
 		const px_baseline: u16 = @intCast(face.*.size.*.metrics.ascender >> 6);
 
-		logger.debug("found font \"{s}\" at {s}", .{ query, file });
+		logger.debug("found font \"{s}\" at {s}",
+			.{ query, std.fs.path.basename(file) });
 		return .{
 			.ft_face = face,
 			.width = px_width, .height = px_height,
@@ -164,34 +195,43 @@ pub const Face = struct {
 		face: Face, allocator: std.mem.Allocator,
 		idx: u32, mode: PixelMode,
 	) Error!Bitmap {
-		if (ft.FT_Load_Glyph(face.ft_face, idx, ft.FT_LOAD_DEFAULT) != 0)
+		if (ft.FT_Load_Glyph(face.ft_face, idx, switch (mode) {
+			.mono => ft.FT_LOAD_TARGET_MONO,
+			.gray => ft.FT_LOAD_TARGET_NORMAL,
+			.lcd => ft.FT_LOAD_TARGET_LCD,
+		}) != 0)
 			return error.DrawFailed;
 		if (ft.FT_Render_Glyph(face.ft_face.*.glyph, switch (mode) {
 			.mono => ft.FT_RENDER_MODE_MONO,
 			.gray => ft.FT_RENDER_MODE_NORMAL,
 			.lcd => ft.FT_RENDER_MODE_LCD,
-		}) != 0)
-			return error.DrawFailed;
+		}) != 0) return error.DrawFailed;
 
-		const g = face.ft_face.*.glyph;
-		const bmp = g.*.bitmap;
-		const bits_per_pixel = mode.bitSize();
-		const pitch = (bmp.width * bits_per_pixel + 31) / 32 * 4;
-		const data = try allocator.alloc(u8, pitch * bmp.rows);
-
-		const bmp_pitch: u32 = @abs(bmp.pitch);
-		for (0..bmp.rows) |i| {
-			const y = if (bmp.pitch > 0) i else bmp.rows - i;
-			@memcpy(data[pitch * y .. pitch * y + pitch],
-				bmp.buffer[bmp_pitch * y .. bmp_pitch * y + pitch]);
+		const g = face.ft_face.*.glyph.*;
+		const ft_bitmap = g.bitmap;
+		const ft_width = @as(u16, @intCast(ft_bitmap.width))
+			/ @as(u16, if (mode == .lcd) 3 else 1);
+		const ft_pitch = @abs(ft_bitmap.pitch);
+		const bitmap: Bitmap = try .init(allocator,
+			@intCast(g.bitmap_left), @intCast(-g.bitmap_top),
+			ft_width, @intCast(ft_bitmap.rows), mode,
+		);
+		for (0..ft_bitmap.rows) |i| {
+			const y = if (ft_bitmap.pitch > 0) i else ft_bitmap.rows - i;
+			for (0..ft_width) |x| {
+				bitmap.putPixel(@intCast(x), @intCast(y), switch (mode) {
+					.mono => ft_bitmap.buffer[ft_pitch * y + x / 8]
+						>> @as(u3, @intCast(7 - x % 8)),
+					.gray => ft_bitmap.buffer[ft_pitch * y + x],
+					.lcd => v: {
+						const buf_idx = ft_pitch * y + 3 * x;
+						break :v (@as(u32, ft_bitmap.buffer[buf_idx]) << 16)
+							+ (@as(u32, ft_bitmap.buffer[buf_idx + 1]) << 8)
+							+ (@as(u32, ft_bitmap.buffer[buf_idx + 2]) << 0);
+					},
+				});
+			}
 		}
-		return .{
-			.x = @intCast(g.*.bitmap_left), .y = @intCast(-g.*.bitmap_top),
-			.w = @as(u16, @intCast(bmp.width))
-				/ @as(u16, if (mode == .lcd) 3 else 1),
-			.h = @intCast(bmp.rows),
-			.pitch = @intCast(pitch),
-			.mode = mode, .data = data,
-		};
+		return bitmap;
 	}
 };

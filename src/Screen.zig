@@ -234,9 +234,12 @@ pub fn draw(
 		if (!scr.lineAt(scr_y).redraw) continue;
 		for (0..scr.width, scr.lineAt(scr_y).c) |x, cell| {
 			var c = cell;
-			if (x == scr.cursor.x and scr_y == scr.cursor.y) {
+			if (x == scr.cursor.x and scr_y == scr.cursor.y)
 				c.graphic.color_types.cursor = true;
-			}
+			if (config.bold_uses_bright_colors
+				and c.graphic.color_types.fg == .four_bit
+				and c.graphic.attrs.intensity == .bold)
+				c.graphic.colors.fg |= 8;
 			try win.renderChar(df, c, @intCast(x), @intCast(display_y));
 		}
 		scr.lineAt(scr_y).redraw = false;

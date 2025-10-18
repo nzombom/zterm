@@ -1,5 +1,6 @@
 //! parse & handle control sequences
 const std = @import("std");
+const config = @import("config.zig");
 const char = @import("char.zig");
 const Pty = @import("Pty.zig");
 const Screen = @import("Screen.zig");
@@ -199,6 +200,7 @@ fn handleCsi(scr: *Screen, pty: *const Pty, t: Token) Error!void {
 					= @min((scr.cursor.x / 8 + (v_op orelse 1)) * 8,
 						scr.width - 1),
 				.IL => {
+					logger.warn("used insert lines; maybe bug", .{});
 					if (v_op == 0) return;
 					const v = v_op orelse 1;
 					for (0..scr.cursor.y - v) |i|
